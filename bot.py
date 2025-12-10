@@ -501,11 +501,10 @@ class AppDropdown(Select):
             )
         
         else:
-            # Standard App: Brief, simple instructions (V1 only)
-            embed = discord.Embed(
-                title=f"{app_emoji} 1-STEP VERIFICATION REQUIRED: {app_name_display}",
-                description=f"You have selected **{app_name_display}**. Please complete the single verification step below to receive your link.",
-                color=discord.Color.blue()
+             embed = discord.Embed(
+             title=f"{app_emoji} 1-STEP VERIFICATION REQUIRED: {app_name_display}",
+             description=f"You have selected **{app_name_display}**. Please complete the single verification step below to receive your link.",
+             color=discord.Color.blue()
             )
             
             embed.add_field(
