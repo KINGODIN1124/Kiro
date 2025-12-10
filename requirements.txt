@@ -1,0 +1,6 @@
+discord.py
+Flask
+gunicorn
+pytz
+requests
+google-cloud-vision
