@@ -546,6 +546,27 @@ class AppSelect(View):
                 discord.ui.Button(label="No Apps Available Yet", style=discord.ButtonStyle.grey, disabled=True)
             )
 
+
+# =============================
+# CREATE TICKET BUTTON VIEW
+# =============================
+class TicketPanelButton(View):
+    def __init__(self):
+        super().__init__(timeout=None) 
+
+    @discord.ui.button(
+        label="Create New Ticket",
+        style=discord.ButtonStyle.blurple,
+        emoji="📩",
+        custom_id="persistent_create_ticket_button" 
+    )
+    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await create_new_ticket(interaction)
+        except discord.errors.Forbidden:
+            await interaction.response.send_message(
+                "❌ Error: I lack necessary permissions (e.g., Create Public Threads) to create your ticket.", 
+                ephemeral=True
 # =============================
 # TICKET CLOSURE VIEW
 # =============================
@@ -578,28 +599,7 @@ class CloseTicketView(View):
         await asyncio.sleep(5)
         
         await perform_ticket_closure(target_channel, interaction.user)
-
-# =============================
-# CREATE TICKET BUTTON VIEW
-# =============================
-class TicketPanelButton(View):
-    def __init__(self):
-        super().__init__(timeout=None) 
-
-    @discord.ui.button(
-        label="Create New Ticket",
-        style=discord.ButtonStyle.blurple,
-        emoji="📩",
-        custom_id="persistent_create_ticket_button" 
-    )
-    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await create_new_ticket(interaction)
-        except discord.errors.Forbidden:
-            await interaction.response.send_message(
-                "❌ Error: I lack necessary permissions (e.g., Create Public Threads) to create your ticket.", 
-                ephemeral=True
-            )
+        )
         except Exception as e:
             print(f"CRITICAL ERROR in Ticket Creation Button: {e}")
             
@@ -632,31 +632,6 @@ class AdminControlPanel(View):
         
         status_text = "ENABLED ✅" if TICKET_CREATION_STATUS else "DISABLED ❌"
         status_color = discord.Color.green() if TICKET_CREATION_STATUS else discord.Color.red()
-
-        embed = discord.Embed(
-            title="⚡ PREMIUM TICKET CONTROL PANEL ⚡",
-            description=f"Current Operational Status: **{status_text}**\n\n"
-                        f"Operational Hours: **{TICKET_START_HOUR_IST}:00 to {TICKET_END_HOUR_IST - 1}:59 IST**.\n\n"
-                        "Use the controls below to manage system state and resources.",
-            color=status_color
-        )
-        
-        await interaction.response.edit_message(embed=embed, view=self)
-
-    # This button allows the admin to refresh the main user panel
-    @discord.ui.button(
-        label="Refresh User Panel",
-        style=discord.ButtonStyle.secondary,
-        custom_id="admin_refresh_user_panel"
-    )
-    async def refresh_panel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.manage_guild:
-            return await interaction.response.send_message("❌ You do not have permission to use this control.", ephemeral=True)
-
-        await setup_ticket_panel(force_resend=True)
-        await interaction.response.send_message("✅ User panel message updated.", ephemeral=True)
-
-
 # =============================
 # VERIFICATION ACTION VIEW
 # =============================
@@ -740,8 +715,9 @@ class VerificationView(View):
             )
         )
         await interaction.response.send_message(f"❌ Denied proof for {self.user.mention}.", ephemeral=True)
-
-      # =============================
+        
+        
+# =============================
 # SLASH COMMANDS (ADMIN GROUP)
 # =============================
 
