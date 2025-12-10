@@ -500,7 +500,7 @@ class AppDropdown(Select):
                 inline=False
             )
         
-else:
+        else:
             # Standard App: Brief, simple instructions (V1 only)
             embed = discord.Embed(
                 title=f"{app_emoji} 1-STEP VERIFICATION REQUIRED: {app_name_display}",
