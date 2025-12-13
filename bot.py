@@ -46,7 +46,6 @@ try:
         INSTRUCTIONS_CHANNEL_ID = int(INSTRUCTIONS_CHANNEL_ID)
     
 except (TypeError, ValueError) as e:
-    # NOTE: This error handling assumes environment variables are set correctly in your deployment environment.
     raise ValueError(f"Missing or invalid required environment variable ID: {e}")
 
 YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL")
@@ -190,7 +189,6 @@ cooldowns = {}
 # ---------------------------
 # Helper Function for Transcripts
 # ---------------------------
-# Updated function to handle both TextChannels and Threads
 async def create_transcript(channel: discord.abc.GuildChannel) -> tuple[list[str], list[discord.Message]]:
     """Fetches channel/thread history, splits into chunks, and returns messages list."""
     
@@ -501,17 +499,18 @@ class AppDropdown(Select):
             )
         
         else:
-             embed = discord.Embed(
-             title=f"{app_emoji} 1-STEP VERIFICATION REQUIRED: {app_name_display}",
-             description=f"You have selected **{app_name_display}**. Please complete the single verification step below to receive your link.",
-             color=discord.Color.blue()
+            # Standard App: Brief, simple instructions (V1 only)
+            embed = discord.Embed(
+                title=f"{app_emoji} 1-STEP VERIFICATION REQUIRED: {app_name_display}",
+                description=f"You have selected **{app_name_display}**. Please complete the single verification step below to receive your link.",
+                color=discord.Color.blue()
             )
             
             embed.add_field(
-            name="➡️ STEP 1: INITIAL SUBSCRIPTION PROOF (V1)",
-            value=f"1. Subscribe to our channel: **[Click Here]({YOUTUBE_CHANNEL_URL})**\n"
-                  f"2. Take a clear **screenshot** of your subscription.\n"
-                  f"3. **Post the screenshot** and type **`RASH TECH`**. The bot will send your final link upon approval.",
+                name="➡️ STEP 1: INITIAL SUBSCRIPTION PROOF (V1)",
+                value=f"1. Subscribe to our channel: **[Click Here]({YOUTUBE_CHANNEL_URL})**\n"
+                      f"2. Take a clear **screenshot** of your subscription.\n"
+                      f"3. **Post the screenshot** and type **`RASH TECH`**. The bot will send your final link upon approval.",
                 inline=False
             )
             
@@ -546,27 +545,6 @@ class AppSelect(View):
                 discord.ui.Button(label="No Apps Available Yet", style=discord.ButtonStyle.grey, disabled=True)
             )
 
-
-# =============================
-# CREATE TICKET BUTTON VIEW
-# =============================
-class TicketPanelButton(View):
-    def __init__(self):
-        super().__init__(timeout=None) 
-
-    @discord.ui.button(
-        label="Create New Ticket",
-        style=discord.ButtonStyle.blurple,
-        emoji="📩",
-        custom_id="persistent_create_ticket_button" 
-    )
-    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await create_new_ticket(interaction)
-        except discord.errors.Forbidden:
-            await interaction.response.send_message(
-                "❌ Error: I lack necessary permissions (e.g., Create Public Threads) to create your ticket.", 
-                ephemeral=True
 # =============================
 # TICKET CLOSURE VIEW
 # =============================
@@ -599,7 +577,28 @@ class CloseTicketView(View):
         await asyncio.sleep(5)
         
         await perform_ticket_closure(target_channel, interaction.user)
-        )
+        
+# =============================
+# CREATE TICKET BUTTON VIEW
+# =============================
+class TicketPanelButton(View):
+    def __init__(self):
+        super().__init__(timeout=None) 
+
+    @discord.ui.button(
+        label="Create New Ticket",
+        style=discord.ButtonStyle.blurple,
+        emoji="📩",
+        custom_id="persistent_create_ticket_button" 
+    )
+    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await create_new_ticket(interaction)
+        except discord.errors.Forbidden:
+            await interaction.response.send_message(
+                "❌ Error: I lack necessary permissions (e.g., Create Public Threads) to create your ticket.", 
+                ephemeral=True
+            )
         except Exception as e:
             print(f"CRITICAL ERROR in Ticket Creation Button: {e}")
             
@@ -609,7 +608,7 @@ class CloseTicketView(View):
                     ephemeral=True
                 )
 
-# =============================
+        # =============================
 # ADMIN CONTROL PANEL
 # =============================
 
@@ -632,6 +631,31 @@ class AdminControlPanel(View):
         
         status_text = "ENABLED ✅" if TICKET_CREATION_STATUS else "DISABLED ❌"
         status_color = discord.Color.green() if TICKET_CREATION_STATUS else discord.Color.red()
+
+        embed = discord.Embed(
+            title="⚡ PREMIUM TICKET CONTROL PANEL ⚡",
+            description=f"Current Operational Status: **{status_text}**\n\n"
+                        f"Operational Hours: **{TICKET_START_HOUR_IST}:00 to {TICKET_END_HOUR_IST - 1}:59 IST**.\n\n"
+                        "Use the controls below to manage system state and resources.",
+            color=status_color
+        )
+        
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    # This button allows the admin to refresh the main user panel
+    @discord.ui.button(
+        label="Refresh User Panel",
+        style=discord.ButtonStyle.secondary,
+        custom_id="admin_refresh_user_panel"
+    )
+    async def refresh_panel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message("❌ You do not have permission to use this control.", ephemeral=True)
+
+        await setup_ticket_panel(force_resend=True)
+        await interaction.response.send_message("✅ User panel message updated.", ephemeral=True)
+
+
 # =============================
 # VERIFICATION ACTION VIEW
 # =============================
@@ -715,8 +739,7 @@ class VerificationView(View):
             )
         )
         await interaction.response.send_message(f"❌ Denied proof for {self.user.mention}.", ephemeral=True)
-        
-        
+
 # =============================
 # SLASH COMMANDS (ADMIN GROUP)
 # =============================
@@ -1025,7 +1048,6 @@ async def send_admin_panel(interaction: discord.Interaction):
 async def ticket(interaction: discord.Interaction):
     await create_new_ticket(interaction)
 
-
 # =============================
 # ON MESSAGE — SCREENSHOT + APP DETECTION
 # =============================
@@ -1149,7 +1171,10 @@ async def on_message(message):
 # ---------------------------
 
 async def setup_ticket_panel(force_resend=False):
-    """Finds or sends the persistent ticket creation button with the requested style."""
+    """
+    Finds or sends the persistent ticket creation button with the requested style,
+    tailored for premium app access.
+    """
     if not TICKET_PANEL_CHANNEL_ID:
         print("WARNING: TICKET_PANEL_CHANNEL_ID is not set. Skipping ticket panel setup.")
         return
@@ -1163,31 +1188,32 @@ async def setup_ticket_panel(force_resend=False):
     panel_embed = discord.Embed(
         title="__Self-Serve Activation__",
         description=f"You can use this panel to activate automatically.\n\n"
-                    f"✨ **Today’s Featured Activation**\n"
-                    f"**Boomin Hot Wave (Exclusive Games + Ubisoft)**\n"
+                    f"✨ **Today’s Featured Access**\n"
+                    f"**Premium Apps & Modded Tools (Spotify, Bilibili, VPN, etc.)**\n"
                     f"\u200b", # Zero-width space for separation
-        color=discord.Color.from_rgb(255, 100, 150)
+        color=discord.Color.from_rgb(255, 100, 150) # Matching the aesthetic
     )
     
-    # Placeholder channels/emojis are used here. Replace with actual IDs.
+    # 1. Activation Time/Status Block 
     panel_embed.add_field(
         name="\u200b", # Blank name
-        value=f"* Panels will open only after we announce it in **#tickets**.\n"
-              f"* **Time: 8:00 PM – 10:00 PM** (converted to your local time).\n"
-              f"* The time above is just an estimate. There is no fixed time, so be ready and wait for the announcement.\n"
-              f"* If it says **'Panels are disabled'**, please engage your brain (if you have any) for a moment and figure out what that means.",
+        value=f"* The system is active only during announced hours.\n"
+              f"* **Time: {TICKET_START_HOUR_IST}:00 – {TICKET_END_HOUR_IST - 1}:59 IST** (converted to your local time).\n"
+              f"* This time is an estimate; fixed time is announced by Admins.\n"
+              f"* If the button says **'DISABLED'**, please wait for the next open window.",
         inline=False
     )
     
-    
+    # 2. Before You Start Block (This is where the IndentationError was pointing)
     panel_embed.add_field(
-        name="<:guide:1315037431174529109> Before You Start", 
+        name="<:guide:1315037431174529109> Before You Start", # Placeholder emoji
         value=f"* Read the <#{INSTRUCTIONS_CHANNEL_ID}> guide.\n"
-              f"* Download clean game files: <#1291774015530340372> | <#1305126161793290321> downloader",
+              f"* Cooldown: **{COOLDOWN_HOURS} hours** between successful access requests.",
         inline=False
     )
     
-    panel_embed.set_footer(text="Done reading? Check out #support.")
+    # 3. How to Request (Implied via the button)
+    panel_embed.set_footer(text="Done reading? Click 'Create New Ticket' below to start. Check #support for help.")
 
 
     try:
@@ -1215,7 +1241,52 @@ async def setup_ticket_panel(force_resend=False):
         print("ERROR: Missing permissions to read or send messages in the ticket panel channel.")
     except Exception as e:
         print(f"An unexpected error occurred during panel setup: {e}")
-        
+
+async def setup_admin_panel(force_resend=False):
+    """Sends or updates the persistent Admin Control Panel."""
+    global TICKET_CREATION_STATUS
+
+    if not ADMIN_PANEL_CHANNEL_ID:
+        print("WARNING: ADMIN_PANEL_CHANNEL_ID is not set. Skipping admin panel setup.")
+        return
+
+    channel = bot.get_channel(ADMIN_PANEL_CHANNEL_ID)
+    if not channel:
+        print(f"ERROR: Could not find admin panel channel with ID {ADMIN_PANEL_CHANNEL_ID}")
+        return
+
+    status_text = "ENABLED ✅" if TICKET_CREATION_STATUS else "DISABLED ❌"
+    status_color = discord.Color.green() if TICKET_CREATION_STATUS else discord.Color.red()
+    
+    panel_embed = discord.Embed(
+        title="⚡ PREMIUM TICKET CONTROL PANEL ⚡",
+        description=f"Current Operational Status: **{status_text}**\n\n"
+                    f"Operational Hours: **{TICKET_START_HOUR_IST}:00 to {TICKET_END_HOUR_IST - 1}:59 IST**.\n\n"
+                    "Use the controls below to manage system state and resources.",
+        color=status_color
+    )
+    
+    try:
+        async for message in channel.history(limit=5):
+            if message.author == bot.user and message.components and message.embeds:
+                if message.embeds[0].title == "⚡ PREMIUM TICKET CONTROL PANEL ⚡":
+                    if force_resend:
+                        await message.delete()
+                        break
+                    else:
+                        await message.edit(embed=panel_embed, view=AdminControlPanel())
+                        print("Updated existing admin panel.")
+                        return
+
+        # Send a new one if not found or if forced
+        await channel.send(embed=panel_embed, view=AdminControlPanel())
+        print("Sent new persistent admin control panel.")
+
+    except discord.Forbidden:
+        print("ERROR: Missing permissions to read or send messages in the admin panel channel.")
+    except Exception as e:
+        print(f"An unexpected error occurred during admin panel setup: {e}")
+
 
 # =============================
 # ON READY
