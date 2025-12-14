@@ -14,7 +14,9 @@ from threading import Thread
 # GLOBAL CONFIGURATION
 # ---------------------------
 V2_APPS_LIST = ["bilibili", "hotstar", "vpn"] 
-COOLDOWN_HOURS = 168 # 7 days
+COOLDOWN_HOURS = 168 # 7 days (Your requested cooldown)
+TEMP_ROLE_DURATION_HOURS = 3 # Duration for the temporary role
+TEMP_ROLE_DURATION_SECONDS = TEMP_ROLE_DURATION_HOURS * 3600
 
 # Ticket operational hours (2:00 PM IST to 11:59 PM IST)
 IST_OFFSET = datetime.timedelta(hours=5, minutes=30)
@@ -25,7 +27,7 @@ TICKET_CREATION_STATUS = True
 V1_REQUIRED_KEYWORDS = ["RASH", "TECH", "SUBSCRIBED"] 
 
 # ---------------------------
-# Environment Variables
+# Environment Variables (CRITICAL IDs)
 # ---------------------------
 TOKEN = os.getenv("DISCORD_TOKEN")
 try:
@@ -44,9 +46,14 @@ try:
     INSTRUCTIONS_CHANNEL_ID = os.getenv("INSTRUCTIONS_CHANNEL_ID")
     if INSTRUCTIONS_CHANNEL_ID:
         INSTRUCTIONS_CHANNEL_ID = int(INSTRUCTIONS_CHANNEL_ID)
+        
+    # NEW REQUIRED IDs for the cooldown/role feature
+    ACTIVATION_CATEGORY_ID = int(os.getenv("ACTIVATION_CATEGORY_ID")) 
+    TEMP_ROLE_ID = int(os.getenv("TEMP_ROLE_ID"))
+    FEEDBACK_CHANNEL_ID = int(os.getenv("FEEDBACK_CHANNEL_ID"))
     
 except (TypeError, ValueError) as e:
-    raise ValueError(f"Missing or invalid required environment variable ID: {e}")
+    raise ValueError(f"Missing or invalid required environment variable ID: {e}. Check all IDs (GUILD_ID, TEMP_ROLE_ID, etc.) are set.")
 
 YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL")
 if not YOUTUBE_CHANNEL_URL or not TOKEN:
@@ -214,18 +221,56 @@ async def create_transcript(channel: discord.abc.GuildChannel) -> tuple[list[str
         
     return transcript_chunks, messages
 
+
 # ---------------------------
-# CORE TICKET CLOSURE LOGIC
+# CORE HELPER: Cooldown Lock Release
 # ---------------------------
-async def perform_ticket_closure(channel: discord.abc.GuildChannel, closer: discord.User):
-    """Performs logging and final deletion/archiving of the channel/thread."""
+async def release_cooldown_lock(member: discord.Member):
+    """Waits for the cooldown to expire and restores category view permissions."""
+    
+    cooldown_end = cooldowns.get(member.id)
+    if not cooldown_end:
+        return
+        
+    wait_time = (cooldown_end - datetime.datetime.now(datetime.timezone.utc)).total_seconds()
+    
+    if wait_time > 0:
+        await asyncio.sleep(wait_time)
+        
+    # Ensure cooldown is truly over before clearing
+    if member.id in cooldowns and cooldowns[member.id] <= datetime.datetime.now(datetime.timezone.utc):
+        del cooldowns[member.id]
+        
+        activation_category = bot.get_channel(ACTIVATION_CATEGORY_ID)
+        if activation_category:
+            await activation_category.set_permissions(
+                member, 
+                read_messages=True, 
+                view_channel=True
+            )
+            # Notify user that cooldown is over (optional)
+            try:
+                await member.send("✅ Your 168-hour access cooldown has expired. You can now create a new ticket.")
+            except discord.Forbidden:
+                pass
+
+
+# ---------------------------
+# CORE TICKET CLOSURE LOGIC (UPDATED with Role/Cooldown)
+# ---------------------------
+async def perform_ticket_closure(channel: discord.abc.GuildChannel, closer: discord.User, apply_cooldown: bool = False):
+    """Performs logging and final deletion/archiving of the channel/thread, with cooldown/role application."""
     
     log_channel = bot.get_channel(TICKET_LOG_CHANNEL_ID)
     
-    transcript_parts, messages = await create_transcript(channel)
+    # Determine the user who opened the ticket (often the first message author)
+    messages = [msg async for msg in channel.history(limit=1, oldest_first=True)]
+    ticket_opener = messages[0].author if messages and messages[0].author != bot.user else closer
+    member = channel.guild.get_member(ticket_opener.id)
+    
+    transcript_parts, all_messages = await create_transcript(channel)
 
     # Get Ticket Metadata
-    ticket_opener = messages[0].author if messages else closer
     open_time = messages[0].created_at if messages else datetime.datetime.now(datetime.timezone.utc)
     close_time = datetime.datetime.now(datetime.timezone.utc)
     duration = close_time - open_time
@@ -256,6 +301,36 @@ async def perform_ticket_closure(channel: discord.abc.GuildChannel, closer: disc
         )
         await log_channel.send(embed=embed)
     
+    # ⚡ NEW FEATURE: Apply Cooldown, Role, and Category Lock ⚡
+    if apply_cooldown and member:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cooldowns[member.id] = now + datetime.timedelta(hours=COOLDOWN_HOURS)
+        
+        # 1. Apply Temporary Role
+        temp_role = channel.guild.get_role(TEMP_ROLE_ID)
+        if temp_role:
+            await member.add_roles(temp_role)
+        
+        # 2. Lock User out of Activation Category (Apply permission DENY)
+        activation_category = bot.get_channel(ACTIVATION_CATEGORY_ID)
+        if activation_category and isinstance(activation_category, discord.CategoryChannel):
+            await activation_category.set_permissions(
+                member, 
+                read_messages=False, 
+                view_channel=False
+            )
+
+        # 3. Send log and set cooldown/role release tasks
+        log_message = f"✅ User {member.mention} processed: Cooldown set for {COOLDOWN_HOURS}h, Temp Role '{temp_role.name}' applied for {TEMP_ROLE_DURATION_HOURS}h."
+        await log_channel.send(log_message)
+            
+        # Task to re-enable category access after cooldown (168 hours)
+        bot.loop.create_task(release_cooldown_lock(member))
+
+        # Task to remove temporary role (3 hours)
+        bot.loop.create_task(remove_temp_role(member, temp_role))
+
+
     # Delete Channel/Archive Thread (CRITICAL STEP)
     if isinstance(channel, discord.Thread):
          await channel.edit(archived=True, locked=True)
@@ -263,6 +338,42 @@ async def perform_ticket_closure(channel: discord.abc.GuildChannel, closer: disc
     else:
         await channel.delete()
         await log_channel.send(f"✅ Ticket channel **{channel.name}** deleted.")
+
+
+# ---------------------------
+# CORE HELPER: Role Removal
+# ---------------------------
+async def remove_temp_role(member: discord.Member, role: discord.Role):
+    """Removes the temporary role after the defined duration."""
+    await asyncio.sleep(TEMP_ROLE_DURATION_SECONDS)
+    try:
+        if role and member in role.members:
+            await member.remove_roles(role)
+    except Exception as e:
+        print(f"Error removing temp role from {member.display_name}: {e}")
+
+# ---------------------------
+# CORE HELPER: Thread Auto-Archival
+# ---------------------------
+async def archive_thread_after_delay(thread: discord.Thread):
+    """Archives the thread after a 10-minute delay."""
+    
+    # Wait for 10 minutes (600 seconds)
+    await asyncio.sleep(600) 
+
+    # Check if the thread is still active and not already closed by an action
+    if not thread.archived:
+        # Note: We don't perform full closure (no role/cooldown) for inactivity.
+        await thread.send(
+            embed=discord.Embed(
+                description="⏳ This ticket thread has been automatically archived due to 10 minutes of inactivity. Access denied.",
+                color=discord.Color.orange()
+            )
+        )
+        try:
+            await thread.edit(archived=True, locked=True)
+        except discord.Forbidden:
+            print(f"Warning: Failed to auto-archive thread {thread.name}. Missing permissions.")
 
 
 # ---------------------------
@@ -278,6 +389,30 @@ async def deliver_and_close(channel: discord.abc.Messageable, user: discord.Memb
     if not app_link:
         return await channel.send("❌ Error: Final link not found. Please contact an admin.")
     
+    # --- STYLIZED DM MESSAGE CONTENT ---
+    
+    # Get required channel objects for mentions
+    guild = bot.get_guild(GUILD_ID)
+    feedback_channel = guild.get_channel(FEEDBACK_CHANNEL_ID) if guild else None
+    
+    # Placeholder for the Support Channel (assuming a dedicated channel ID is needed for 'help')
+    # NOTE: You might need to add a SUPPORT_CHANNEL_ID environment variable if this isn't FEEDBACK_CHANNEL_ID
+    support_channel_mention = "#support" # Using text placeholder
+    if feedback_channel:
+        support_channel_mention = feedback_channel.mention 
+
+    dm_message = (
+        "──────✮<a:Star:1315046783990239325>✮──────\n"
+        f"### 🎉 Enjoy your **{app_name_display}** Premium Access! <:Hug:1315198669439504465>\n"
+        f"### Don't forget to leave a quick review in {feedback_channel.mention if feedback_channel else '#feedback'}\n"
+        "──────✮<a:Star:1315046783990239325>✮──────\n"
+        "### Thank you, and have a wonderful day ahead! <:Hii:1315042464893112410><a:Spark:1315201119068229692>\n"
+        "──────✮<a:Star:1315046783990239325>✮──────\n"
+        f"## P.S. You will receive a temporary {TEMP_ROLE_DURATION_HOURS}-hour Limited Access role, which will be removed automatically. You can request another app once the **168-hour cooldown** is removed.\n"
+        f"If you encounter any problems, please visit {support_channel_mention} for help."
+    )
+    
+    # Embed for the App Link
     embed = discord.Embed(
         title="✅ Verification Approved! Access Granted!",
         description=f"Congratulations, {user.mention}! Your verification for **{app_name_display}** is complete.\n\n"
@@ -289,7 +424,9 @@ async def deliver_and_close(channel: discord.abc.Messageable, user: discord.Memb
     await channel.send(embed=embed)
     
     try:
-        await user.send(embed=embed) # Send DM
+        # Send stylized DM and link embed
+        await user.send(dm_message) 
+        await user.send(embed=embed) 
     except discord.Forbidden:
         pass # Ignore if DMs are closed
 
@@ -297,10 +434,10 @@ async def deliver_and_close(channel: discord.abc.Messageable, user: discord.Memb
     await channel.send(
         embed=discord.Embed(
             title="🎉 Service Completed — Time to Close!",
-            description="Please close the ticket using the button below. This will archive the thread.",
+            description="Please close the ticket using the button below. This action will apply your cooldown and category lock.",
             color=discord.Color.green(),
         ),
-        view=CloseTicketView()
+        view=CloseTicketView(user) 
     )
 
 # ---------------------------
@@ -324,7 +461,27 @@ async def create_new_ticket(interaction: discord.Interaction):
             ephemeral=True
         )
 
-    # 2. Check Cooldown
+    # 2. Check Cooldown/Category Lock
+    activation_category = bot.get_channel(ACTIVATION_CATEGORY_ID)
+    if activation_category and isinstance(activation_category, discord.CategoryChannel):
+        permissions = activation_category.permissions_for(user)
+        if not permissions.view_channel:
+            # User is locked out by the category override (cooldown is active)
+            cooldown_end = cooldowns.get(user.id)
+            time_left_str = str(cooldown_end - now).split('.')[0] if cooldown_end and cooldown_end > now else "N/A"
+            
+            return await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="⏳ Access Restricted - Cooldown Active",
+                    description=f"You recently received access and are currently under a security cooldown.\n"
+                                f"Remaining time: **`{time_left_str}`**.\n"
+                                f"Please wait until the restriction is automatically removed.",
+                    color=discord.Color.orange()
+                ),
+                ephemeral=True
+            )
+    
+    # 3. Check Cooldown (Backup check)
     if user.id in cooldowns and cooldowns[user.id] > now:
         remaining = cooldowns[user.id] - now
         time_left_str = str(remaining).split('.')[0] 
@@ -344,7 +501,6 @@ async def create_new_ticket(interaction: discord.Interaction):
     # Check if the user already has an active thread/ticket
     thread_name_prefix = f"ticket-{user.id}"
     
-    # Search active public threads in the channel where the button was clicked
     active_threads = [t for t in interaction.channel.threads if not t.archived]
     existing_thread = discord.utils.get(active_threads, name=thread_name_prefix)
     
@@ -358,9 +514,9 @@ async def create_new_ticket(interaction: discord.Interaction):
             ephemeral=True
         )
 
-    # 3. Create Thread
-    cooldowns[user.id] = now + datetime.timedelta(hours=COOLDOWN_HOURS)
-
+    # Cooldown will be set only upon successful closure, removing the initial cooldown set here.
+    
+    # 4. Create Thread
     try:
         thread = await interaction.channel.create_thread(
             name=thread_name_prefix,
@@ -368,14 +524,15 @@ async def create_new_ticket(interaction: discord.Interaction):
             auto_archive_duration=60 # Archive after 60 minutes of inactivity
         )
     except discord.Forbidden as e:
-        cooldowns[user.id] = now # Reset cooldown on failure
         print(f"ERROR: Bot lacks permission to create thread in channel {interaction.channel.name}: {e}")
         return await interaction.followup.send(
-            "❌ Error: I lack necessary permissions to create a ticket thread in this channel.", 
+            "❌ Error: I lack necessary permissions to create a ticket thread in this channel. (Check 'Create Public Threads').", 
             ephemeral=True
         )
     
-    # Rename variable for compatibility with the existing welcome message code
+    # Set the 10-minute auto-archival timer
+    bot.loop.create_task(archive_thread_after_delay(thread))
+    
     channel = thread 
 
     # --- ENHANCED STYLISH WELCOME MESSAGE ---
@@ -544,14 +701,14 @@ class AppSelect(View):
             self.add_item(
                 discord.ui.Button(label="No Apps Available Yet", style=discord.ButtonStyle.grey, disabled=True)
             )
-
 # =============================
 # TICKET CLOSURE VIEW
 # =============================
 class CloseTicketView(View):
     """View used for the final closure button in a ticket channel/thread."""
-    def __init__(self):
+    def __init__(self, target_user: discord.Member = None):
         super().__init__(timeout=None) 
+        self.target_user = target_user
 
     @discord.ui.button(
         label="Close Ticket",
@@ -568,15 +725,13 @@ class CloseTicketView(View):
                 ephemeral=True
             )
 
-        # Immediate Response
         await interaction.response.send_message(
-            "Closing ticket... Generating transcript and archiving/deleting in 5 seconds. ⏳", 
+            "Closing ticket and applying cooldown... ⏳", 
             ephemeral=False
         )
         
-        await asyncio.sleep(5)
-        
-        await perform_ticket_closure(target_channel, interaction.user)
+        # Pass apply_cooldown=True to trigger the full shutdown/cooldown logic
+        await perform_ticket_closure(target_channel, interaction.user, apply_cooldown=True)
         
 # =============================
 # CREATE TICKET BUTTON VIEW
@@ -608,7 +763,7 @@ class TicketPanelButton(View):
                     ephemeral=True
                 )
 
-        # =============================
+# =============================
 # ADMIN CONTROL PANEL
 # =============================
 
@@ -700,7 +855,7 @@ class VerificationView(View):
                 description=f"Congratulations, {self.user.mention}! Your subscription proof has been verified by an admin (**{interaction.user.display_name}**).\n\n"
                             f"➡️ **YOUR NEXT STEP (V2 Final Verification):**\n"
                             f"1. Go to this final verification site: **[Click Here]({v2_link})**\n"
-                            f"2. Download the file and find the secret code.\n"
+                            f"2. Download the file, find the secret code.\n"
                             f"3. Post the **screenshot of the file/code** in this chat and type the code (e.g., `{app_name_display.upper()} KEY: <code_here>`).",
                 color=discord.Color.yellow()
             )
@@ -842,18 +997,40 @@ async def remove_cooldown(interaction: discord.Interaction, user: discord.Member
     global cooldowns
     await interaction.response.defer(ephemeral=True)
 
+    # Manual clear of cooldown data
     if user.id in cooldowns:
         del cooldowns[user.id]
+        cooldown_cleared = True
+    else:
+        cooldown_cleared = False
 
+    # Manual clear of category lock
+    activation_category = bot.get_channel(ACTIVATION_CATEGORY_ID)
+    if activation_category and isinstance(activation_category, discord.CategoryChannel):
+        await activation_category.set_permissions(
+            user, 
+            read_messages=True, 
+            view_channel=True
+        )
+
+    # Manual clear of temporary role
+    temp_role = interaction.guild.get_role(TEMP_ROLE_ID)
+    if temp_role and temp_role in user.roles:
+        await user.remove_roles(temp_role)
+        role_cleared = True
+    else:
+        role_cleared = False
+        
+    if cooldown_cleared or role_cleared:
         embed = discord.Embed(
-            title="✅ Cooldown Removed",
-            description=f"The cooldown for {user.mention} has been manually cleared. They can now create a new ticket immediately. 🔓",
+            title="✅ Restriction Removed",
+            description=f"The cooldown and category lock for {user.mention} have been manually cleared. They can create a new ticket immediately. 🔓",
             color=discord.Color.green()
         )
     else:
         embed = discord.Embed(
-            title="ℹ️ No Active Cooldown Found",
-            description=f"User {user.mention} currently has no ticket cooldown active.",
+            title="ℹ️ No Active Restriction Found",
+            description=f"User {user.mention} currently has no active ticket cooldown or temporary role/lock.",
             color=discord.Color.blue()
         )
     
@@ -872,7 +1049,6 @@ async def force_close(interaction: discord.Interaction, target: discord.abc.Guil
 
     is_ticket = target_channel.name.startswith("ticket-")
     
-    # Allow closing of threads/channels/current thread if it's a ticket
     if not is_ticket:
         return await interaction.response.send_message(
             "❌ This command must be used inside a ticket thread/channel, or you must specify a valid ticket name.",
@@ -883,10 +1059,11 @@ async def force_close(interaction: discord.Interaction, target: discord.abc.Guil
     
     await interaction.edit_original_response(content=f"Preparing to force close {target_channel.mention}...")
 
-    await perform_ticket_closure(target_channel, interaction.user) 
+    # For force close, we do NOT apply the cooldown/role logic
+    await perform_ticket_closure(target_channel, interaction.user, apply_cooldown=False) 
     
     try:
-        await interaction.followup.send(f"✅ Force close successful! {target_channel.name} is deleted/archived.", ephemeral=True)
+        await interaction.followup.send(f"✅ Force close successful! {target_channel.name} is archived/deleted.", ephemeral=True)
     except:
         pass
 
@@ -920,23 +1097,10 @@ async def send_app(interaction: discord.Interaction, app_name: str, user: discor
             ephemeral=True
         )
 
-    embed = discord.Embed(
-        title="✨ Premium App Delivered!",
-        description=f"Here is your link for **{app_name_display}**:\n[Click Here]({link})",
-        color=discord.Color.green()
-    )
+    # Deliver the link and prompt for closure (this will prompt the user to click the button)
+    await deliver_and_close(ticket_channel, user, app_key)
 
-    await ticket_channel.send(embed=embed)
-    await ticket_channel.send(
-        embed=discord.Embed(
-            title="🎉 Service Completed",
-            description="If you're all set, close the ticket using the button below. This will archive the thread.",
-            color=discord.Color.green()
-        ),
-        view=CloseTicketView()
-    )
-
-    await interaction.response.send_message("Link sent to the ticket!", ephemeral=True)
+    await interaction.response.send_message("Link sent to the ticket and closure requested!", ephemeral=True)
 
 
 # --- /verify_v2_final ---
@@ -970,7 +1134,7 @@ async def verify_v2_final(interaction: discord.Interaction, app_name: str, user:
     
     await interaction.response.defer(ephemeral=True, thinking=True)
 
-    # Deliver the final link and prompt for closure
+    # Deliver the link and prompt for closure (this will prompt the user to click the button)
     await deliver_and_close(ticket_channel, user, app_key)
 
     await interaction.followup.send(f"✅ Final link for **{app_name_display}** sent to {user.mention} in {ticket_channel.mention}. Process complete!", ephemeral=True)
@@ -1054,11 +1218,14 @@ async def ticket(interaction: discord.Interaction):
 @bot.event
 async def on_message(message):
 
+    # 🛑 CRITICAL FIX: Ignore DMs and messages not from a guild
+    if message.guild is None:
+        return
+        
     # Check if channel is a ticket thread or channel
-    is_ticket_channel = message.channel.name.startswith("ticket-")
-    is_ticket_thread = isinstance(message.channel, discord.Thread) and message.channel.name.startswith("ticket-")
+    is_ticket = message.channel.name.startswith("ticket-")
 
-    if message.author.bot or not (is_ticket_channel or is_ticket_thread):
+    if message.author.bot or not is_ticket:
         return
 
     content_upper = message.content.upper()
@@ -1120,7 +1287,6 @@ async def on_message(message):
             embed.set_image(url=screenshot)
             
             # Send the V1 verification panel with buttons
-            # NOTE: Pass the thread/channel object as ticket_channel
             await ver_channel.send(
                 embed=embed,
                 view=VerificationView(ticket_destination, message.author, app_key, screenshot)
@@ -1204,7 +1370,7 @@ async def setup_ticket_panel(force_resend=False):
         inline=False
     )
     
-    # 2. Before You Start Block (This is where the IndentationError was pointing)
+    # 2. Before You Start Block
     panel_embed.add_field(
         name="<:guide:1315037431174529109> Before You Start", # Placeholder emoji
         value=f"* Read the <#{INSTRUCTIONS_CHANNEL_ID}> guide.\n"
