@@ -27,6 +27,13 @@ TICKET_CREATION_STATUS = True
 V1_REQUIRED_KEYWORDS = ["RASH", "TECH", "SUBSCRIBED"] 
 BYPASS_HOURS_ACTIVE = False # Global flag for admin bypass
 
+# New Category Map for the Dropdown (Groupings based on your provided list)
+APP_CATEGORIES = {
+    "Streaming & Entertainment": ["spotify", "youtube", "hotstar", "bilibili"],
+    "Productivity & Tools": ["kinemaster", "truecaller", "castle"],
+    "Security & VPN": ["vpn"],
+}
+
 # ---------------------------
 # Environment Variables (CRITICAL IDs)
 # ---------------------------
@@ -473,7 +480,7 @@ async def create_new_ticket(interaction: discord.Interaction):
             color=discord.Color.red()
         )
         
-        # 🛑 FIX 1: Use interaction.followup.send() since deferral is handled by the calling function
+        # Use interaction.followup.send() since deferral is handled by the calling function
         return await interaction.followup.send(
             embed=closed_embed, 
             ephemeral=True
@@ -495,7 +502,7 @@ async def create_new_ticket(interaction: discord.Interaction):
                 color=discord.Color.orange()
             )
             
-            # 🛑 FIX 2: Use interaction.followup.send()
+            # Use interaction.followup.send()
             return await interaction.followup.send(
                 embed=closed_embed_cooldown,
                 ephemeral=True
@@ -513,7 +520,7 @@ async def create_new_ticket(interaction: discord.Interaction):
             color=discord.Color.orange()
         )
         
-        # 🛑 FIX 3: Use interaction.followup.send()
+        # Use interaction.followup.send()
         return await interaction.followup.send(
             embed=closed_embed_cooldown,
             ephemeral=True
@@ -528,7 +535,7 @@ async def create_new_ticket(interaction: discord.Interaction):
     existing_thread = discord.utils.get(active_threads, name=thread_name_prefix)
     
     if existing_thread:
-        # 🛑 FIX 4: Use interaction.followup.send()
+        # Use interaction.followup.send()
          return await interaction.followup.send(
             embed=discord.Embed(
                 title="⚠️ Existing Ticket Found",
@@ -547,7 +554,7 @@ async def create_new_ticket(interaction: discord.Interaction):
         )
     except discord.Forbidden as e:
         print(f"ERROR: Bot lacks permission to create thread in channel {interaction.channel.name}: {e}")
-        # 🛑 FIX 5: Use interaction.followup.send()
+        # Use interaction.followup.send()
         return await interaction.followup.send(
             "❌ Error: I lack necessary permissions to create a ticket thread in this channel. (Check 'Create Public Threads').", 
             ephemeral=True
@@ -604,7 +611,7 @@ async def create_new_ticket(interaction: discord.Interaction):
 
     await channel.send(f"Welcome {user.mention}! Please select an application below.", embed=embed, view=AppSelect(interaction.user))
 
-    # 🛑 FIX 6: Use interaction.followup.send() for final successful response
+    # Use interaction.followup.send() for final successful response
     await interaction.followup.send(
         f"✅ Ticket thread created successfully! Head over to {thread.mention} to continue.",
         ephemeral=True
@@ -612,10 +619,66 @@ async def create_new_ticket(interaction: discord.Interaction):
 
 
 # =============================
-# APP SELECT VIEW
+# CATEGORY SELECT VIEW (The main ticket panel view)
+# =============================
+class CategoryDropdown(Select):
+    def __init__(self, categories):
+        options = []
+        for category_name in categories.keys():
+            options.append(
+                discord.SelectOption(
+                    label=category_name, 
+                    value=category_name.replace(" ", "_").lower(),
+                    description=f"Select an app from the {category_name} suite.",
+                    emoji="🏷️"
+                )
+            )
+        
+        super().__init__(
+            placeholder="🛒 Tap here to select your desired App Category...", 
+            min_values=1, 
+            max_values=1, 
+            options=options,
+            custom_id="category_select_dropdown"
+        )
+        self.categories = categories
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True) 
+        
+        category_key = self.values[0]
+        category_name = category_key.replace("_", " ").title()
+        
+        app_list = self.categories.get(category_name) # Get the list of apps in this category
+        
+        if not app_list:
+            return await interaction.followup.send("❌ Error: App list for this category is empty or missing.", ephemeral=True)
+            
+        # Create a new AppSelectView with options filtered by the selected category
+        app_select_view = AppSelect(interaction.user, allowed_apps=app_list)
+
+        embed = discord.Embed(
+            title=f"📦 {category_name} Selected",
+            description="Please select the specific premium app you want access to from the list below.",
+            color=discord.Color.blue()
+        )
+        
+        await interaction.followup.send(embed=embed, view=app_select_view, ephemeral=True)
+
+
+class CategorySelectView(View):
+    def __init__(self):
+        super().__init__(timeout=None) 
+        # Use the global APP_CATEGORIES map
+        self.add_item(CategoryDropdown(APP_CATEGORIES))
+
+
+# =============================
+# APP SELECT VIEW (UPDATED to accept filtering)
 # =============================
 class AppDropdown(Select):
     def __init__(self, options, user):
+        # We must change the custom_id to match the core logic of the on_message handler
         super().__init__(
             placeholder="🛒 Tap here to select your desired Premium App...", 
             min_values=1, 
@@ -626,88 +689,38 @@ class AppDropdown(Select):
         self.user = user
 
     async def callback(self, interaction: discord.Interaction):
-        # Acknowledge interaction immediately (always defer inside callbacks)
         await interaction.response.defer() 
         
         app_key = self.values[0]
         app_name_display = app_key.title()
-        app_emoji = get_app_emoji(app_key)
         
-        is_v2_app = app_key in V2_APPS_LIST
-        
-        # --- LOCK THE SELECTION ---
+        # --- LOCK THE SELECTION & START TICKET ---
         await interaction.message.edit(
-            content=f"**✅ Selection Locked: {app_name_display}**\n\nSee the specific instructions below.",
+            content=f"**✅ Selection Locked: {app_name_display}**\n\nStarting ticket process...",
             embed=None,
             view=None
         )
-        # --------------------------
 
-        # --- CONDITIONAL INSTRUCTION LOGIC ---
-        if is_v2_app:
-            v2_link = v2_links.get(app_key)
-            
-            if not v2_link:
-                 embed_error = discord.Embed(
-                    title="❌ Setup Error: V2 Link Missing",
-                    description=f"Admin: V2 link for {app_name_display} is not configured in v2_links.json.", 
-                    color=discord.Color.red()
-                 )
-                 return await interaction.followup.send(embed=embed_error, ephemeral=False)
-
-            # V2 App: Detailed, specific instructions (V1 + V2 explained upfront)
-            embed = discord.Embed(
-                title=f"{app_emoji} 2-STEP VERIFICATION REQUIRED: {app_name_display} 🔒",
-                description=f"You have selected **{app_name_display}**. This app requires two security steps. Please complete **Step 1** now.",
-                color=discord.Color.from_rgb(255, 165, 0) # Orange/Gold
-            )
-            
-            embed.add_field(
-                name="➡️ STEP 1: INITIAL SUBSCRIPTION PROOF (V1)",
-                value=f"1. Subscribe to our channel: **[Click Here]({YOUTUBE_CHANNEL_URL})**\n"
-                      f"2. Take a clear **screenshot** of your subscription.\n"
-                      f"3. **Post the screenshot** and type **`RASH TECH`** in the message.",
-                inline=False
-            )
-            
-            embed.add_field(
-                name="➡️ STEP 2: FINAL KEY CHECK (V2)",
-                value=f"This step is required **AFTER** Admin approves your Step 1 proof.\n"
-                      f"1. Go to the final verification site: **[Click Here]({v2_link})**\n"
-                      f"2. Download the file, find the secret code (e.g., **`{app_name_display} KEY`**).\n"
-                      f"3. **Resubmit the screenshot** of the open file and type the exact code: **`{app_name_display} KEY: <code_here>`**.",
-                inline=False
-            )
-        
-        else:
-            # Standard App: Brief, simple instructions (V1 only)
-            embed = discord.Embed(
-                title=f"{app_emoji} 1-STEP VERIFICATION REQUIRED: {app_name_display}",
-                description=f"You have selected **{app_name_display}**. Please complete the single verification step below to receive your link.",
-                color=discord.Color.blue()
-            )
-            
-            embed.add_field(
-                name="➡️ STEP 1: INITIAL SUBSCRIPTION PROOF (V1)",
-                value=f"1. Subscribe to our channel: **[Click Here]({YOUTUBE_CHANNEL_URL})**\n"
-                      f"2. Take a clear **screenshot** of your subscription.\n"
-                      f"3. **Post the screenshot** and type **`RASH TECH`**. The bot will send your final link upon approval.",
-                inline=False
-            )
-            
-        await interaction.followup.send(embed=embed, ephemeral=False)
+        try:
+            # Call the specialized thread starter logic
+            await self.view.start_ticket_thread_after_selection(interaction, app_key)
+        except Exception as e:
+            print(f"Error starting ticket thread after selection: {e}")
+            await interaction.followup.send(f"❌ Failed to start ticket thread. Error: {e}", ephemeral=True)
 
 
 class AppSelect(View):
-    def __init__(self, user):
+    def __init__(self, user, allowed_apps=None):
         super().__init__(timeout=1800)
         
         current_apps = load_apps()
         
         options = []
-        for app_key in current_apps.keys():
+        
+        apps_to_show = {k: v for k, v in current_apps.items() if allowed_apps is None or k in allowed_apps}
+        
+        for app_key in apps_to_show.keys():
             app_name_display = app_key.title()
-            
             emoji = get_app_emoji(app_key)
             
             options.append(
@@ -723,9 +736,125 @@ class AppSelect(View):
             self.add_item(AppDropdown(options, user))
         else:
             self.add_item(
-                discord.ui.Button(label="No Apps Available Yet", style=discord.ButtonStyle.grey, disabled=True)
+                discord.ui.Button(label="No Apps Available in this Category", style=discord.ButtonStyle.grey, disabled=True)
             )
+            
+    async def start_ticket_thread_after_selection(self, interaction: discord.Interaction, app_key: str):
+        # Replicates the essential steps of create_new_ticket
+        user = interaction.user
+        now = datetime.datetime.now(datetime.timezone.utc)
+        
+        # --- Simplified Cooldown Check Block (Must be robust) ---
+        activation_category = bot.get_channel(ACTIVATION_CATEGORY_ID)
+        if activation_category and isinstance(activation_category, discord.CategoryChannel):
+            permissions = activation_category.permissions_for(user)
+            if not permissions.view_channel:
+                cooldown_end = cooldowns.get(user.id)
+                time_left_str = str(cooldown_end - now).split('.')[0] if cooldown_end and cooldown_end > now else "N/A"
+                
+                closed_embed_cooldown = discord.Embed(
+                    title="⏳ Access Restricted - Cooldown Active",
+                    description=f"You recently received access and are currently under a security cooldown.\n"
+                                f"Remaining time: **`{time_left_str}`**.\n"
+                                f"Please wait until the restriction is automatically removed.",
+                    color=discord.Color.orange()
+                )
+                return await interaction.followup.send(embed=closed_embed_cooldown, ephemeral=True)
+        
+        if user.id in cooldowns and cooldowns[user.id] > now:
+            remaining = cooldowns[user.id] - now
+            time_left_str = str(remaining).split('.')[0] 
+            
+            closed_embed_cooldown = discord.Embed(
+                title="⏳ Cooldown Active - Please Wait",
+                description=f"You recently opened a ticket. You can open your next ticket in:\n"
+                            f"**`{time_left_str}`**",
+                color=discord.Color.orange()
+            )
+            return await interaction.followup.send(embed=closed_embed_cooldown, ephemeral=True)
 
+        thread_name_prefix = f"ticket-{user.id}"
+        active_threads = [t for t in interaction.channel.threads if not t.archived]
+        existing_thread = discord.utils.get(active_threads, name=thread_name_prefix)
+        
+        if existing_thread:
+             return await interaction.followup.send(
+                embed=discord.Embed(
+                    title="⚠️ Existing Ticket Found",
+                    description=f"You already have an active ticket thread: {existing_thread.mention}",
+                    color=discord.Color.orange()
+                ),
+                ephemeral=True
+            )
+        # --- End Simplified Cooldown Check Block ---
+
+
+        # 3. Create Thread
+        try:
+            thread = await interaction.channel.create_thread(
+                name=thread_name_prefix,
+                type=discord.ChannelType.public_thread,
+                auto_archive_duration=60 
+            )
+        except discord.Forbidden as e:
+            print(f"ERROR: Bot lacks permission to create thread in channel {interaction.channel.name}: {e}")
+            return await interaction.followup.send(
+                "❌ Error: I lack necessary permissions to create a ticket thread in this channel. (Check 'Create Public Threads').", 
+                ephemeral=True
+            )
+        
+        # Set the 10-minute auto-archival timer
+        bot.loop.create_task(archive_thread_after_delay(thread))
+        channel = thread 
+        
+        # 4. Send Welcome Message (Customized for selected app)
+        app_name_display = app_key.title()
+        app_emoji = get_app_emoji(app_key)
+        is_v2_app = app_key in V2_APPS_LIST
+        
+        if is_v2_app:
+            v2_link = v2_links.get(app_key)
+            embed = discord.Embed(
+                title=f"{app_emoji} 2-STEP VERIFICATION REQUIRED: {app_name_display} 🔒",
+                description=f"You have selected **{app_name_display}**. This app requires two security steps. Please complete **Step 1** now.",
+                color=discord.Color.from_rgb(255, 165, 0)
+            )
+            embed.add_field(
+                name="➡️ STEP 1: INITIAL SUBSCRIPTION PROOF (V1)",
+                value=f"1. Subscribe to our channel: **[Click Here]({YOUTUBE_CHANNEL_URL})**\n"
+                      f"2. Take a clear **screenshot** of your subscription.\n"
+                      f"3. **Post the screenshot** and type **`RASH TECH`** in the message.",
+                inline=False
+            )
+            embed.add_field(
+                name="➡️ STEP 2: FINAL KEY CHECK (V2)",
+                value=f"This step is required **AFTER** Admin approves your Step 1 proof.\n"
+                      f"1. Go to the final verification site: **[Click Here]({v2_link})**\n"
+                      f"2. Download the file, find the secret code (e.g., **`{app_name_display} KEY`**).\n"
+                      f"3. **Resubmit the screenshot** of the open file and type the exact code: **`{app_name_display} KEY: <code_here>`**.",
+                inline=False
+            )
+        else:
+            embed = discord.Embed(
+                title=f"{app_emoji} 1-STEP VERIFICATION REQUIRED: {app_name_display}",
+                description=f"You have selected **{app_name_display}**. Please complete the single verification step below to receive your link.",
+                color=discord.Color.blue()
+            )
+            embed.add_field(
+                name="➡️ STEP 1: INITIAL SUBSCRIPTION PROOF (V1)",
+                value=f"1. Subscribe to our channel: **[Click Here]({YOUTUBE_CHANNEL_URL})**\n"
+                      f"2. Take a clear **screenshot** of your subscription.\n"
+                      f"3. **Post the screenshot** and type **`RASH TECH`**. The bot will send your final link upon approval.",
+                inline=False
+            )
+        
+        # 5. Send Welcome and Final Confirmation
+        await channel.send(f"Welcome {user.mention}! Your selected app is **{app_name_display}**.", embed=embed)
+
+        await interaction.followup.send(
+            f"✅ Ticket thread created successfully for **{app_name_display}**! Head over to {thread.mention} to continue.",
+            ephemeral=True
+        )
 # =============================
 # TICKET CLOSURE VIEW
 # =============================
@@ -757,39 +886,8 @@ class CloseTicketView(View):
         )
         
         # Pass apply_cooldown=True to trigger the full shutdown/cooldown logic
-        # Use interaction.user as closer
         await perform_ticket_closure(target_channel, interaction.user, apply_cooldown=True)
         
-# =============================
-# CREATE TICKET BUTTON VIEW
-# =============================
-class TicketPanelButton(View):
-    def __init__(self):
-        super().__init__(timeout=None) 
-
-    @discord.ui.button(
-        label="Create New Ticket",
-        style=discord.ButtonStyle.blurple,
-        emoji="📩",
-        custom_id="persistent_create_ticket_button" 
-    )
-    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 🛑 FIX 7: Acknowledge the interaction immediately with defer()
-        try:
-            await interaction.response.defer(ephemeral=True, thinking=True)
-            await create_new_ticket(interaction)
-        except Exception as e:
-            print(f"CRITICAL ERROR in Ticket Creation Button: {e}")
-            # 🛑 FIX 8: Send the error as a FOLLOWUP message
-            try:
-                await interaction.followup.send(
-                    "❌ An unexpected error occurred while processing your ticket request. Please notify an administrator.", 
-                    ephemeral=True
-                )
-            except discord.Forbidden:
-                 pass # Ignore if we can't send the followup
-
-
 # =============================
 # ADMIN STATUS & BYPASS PANEL
 # =============================
@@ -816,38 +914,43 @@ class AdminStatusView(View):
         )
 
     # ---------------------------
-    # INTERACTION CALLBACKS
+    # CORE DISPATCH HANDLER (FIX)
     # ---------------------------
-
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         # Only allow the owner (you) to use these controls
         if interaction.user.id != self.owner_id:
              await interaction.response.send_message("❌ You are not authorized to use the admin controls.", ephemeral=True)
              return False
         return True
+        
+    async def on_item_interaction(self, interaction: discord.Interaction, item: discord.ui.Item):
+        # Acknowledge deferral for the bypass button
+        if item.custom_id == "admin_toggle_bypass":
+            await interaction.response.defer(ephemeral=True)
+            await self._handle_bypass_toggle(interaction)
+        # Decorated buttons are handled automatically
 
     @discord.ui.button(label="TOGGLE GLOBAL TICKET STATUS", style=discord.ButtonStyle.secondary, custom_id="admin_toggle_global_status")
     async def toggle_status_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         global TICKET_CREATION_STATUS
+        
+        await interaction.response.defer()
+
         TICKET_CREATION_STATUS = not TICKET_CREATION_STATUS
         
         embed = self._create_status_embed()
-        
-        # We need to recreate the view to correctly update the bypass button if time changes
         new_view = AdminStatusView(self.owner_id)
         
-        await interaction.response.edit_message(embed=embed, view=new_view)
+        await interaction.edit_original_response(embed=embed, view=new_view)
         
     @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.blurple, custom_id="admin_refresh_status_panel")
     async def refresh_status_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        
+        await interaction.response.defer()
+        
         embed = self._create_status_embed()
         new_view = AdminStatusView(self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=new_view)
-
-    async def on_button_interaction(self, interaction: discord.Interaction):
-        if interaction.custom_id == "admin_toggle_bypass":
-            await self._handle_bypass_toggle(interaction)
-        # Note: toggle_status_button is handled by its decorator
+        await interaction.edit_original_response(embed=embed, view=new_view)
 
 
     # ---------------------------
@@ -855,6 +958,8 @@ class AdminStatusView(View):
     # ---------------------------
     
     def _create_status_embed(self) -> discord.Embed:
+        global BYPASS_HOURS_ACTIVE
+        
         status_text = "ENABLED ✅" if TICKET_CREATION_STATUS else "DISABLED ❌"
         bypass_text = "ACTIVE (Ignoring Clock) 🟢" if BYPASS_HOURS_ACTIVE else "INACTIVE 🔴"
         
@@ -881,10 +986,13 @@ class AdminStatusView(View):
         BYPASS_HOURS_ACTIVE = not BYPASS_HOURS_ACTIVE
         
         embed = self._create_status_embed()
-        # Recreate view to reflect the new state (the button label changes)
         new_view = AdminStatusView(self.owner_id)
         
-        await interaction.response.edit_message(embed=embed, view=new_view)
+        # EDIT the original message
+        await interaction.message.edit(embed=embed, view=new_view)
+        
+        # Send ephemeral confirmation (already deferred)
+        await interaction.followup.send(f"Bypass toggled to: {'ACTIVE' if BYPASS_HOURS_ACTIVE else 'INACTIVE'}", ephemeral=True)
 
 
 # =============================
@@ -1294,7 +1402,7 @@ async def status_command(interaction: discord.Interaction):
 @bot.tree.command(name="ticket", description="🎟️ Create a support ticket thread")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def ticket(interaction: discord.Interaction):
-    # 🛑 FIX 9: Acknowledge the interaction immediately with defer()
+    # Acknowledge the interaction immediately with defer()
     try:
         await interaction.response.defer(ephemeral=True, thinking=True)
         await create_new_ticket(interaction)
@@ -1473,7 +1581,7 @@ async def setup_ticket_panel(force_resend=False):
     )
     
     # 3. How to Request (Implied via the button)
-    panel_embed.set_footer(text="Done reading? Click 'Create New Ticket' below to start. Check #support for help.")
+    panel_embed.set_footer(text="Done reading? Select a category from the dropdown below to start. Check #support for help.")
 
 
     try:
@@ -1482,8 +1590,8 @@ async def setup_ticket_panel(force_resend=False):
 
         async for message in channel.history(limit=5):
             if message.author == bot.user and message.components:
-                # Check for the custom ID used by the button
-                if message.components[0].children[0].custom_id == "persistent_create_ticket_button":
+                # Check for the custom ID used by the dropdown view
+                if message.components[0].children[0].custom_id == "category_select_dropdown":
                     panel_message_found = True
                     panel_message = message
                     break
@@ -1494,7 +1602,8 @@ async def setup_ticket_panel(force_resend=False):
             print("Deleted old ticket panel message due to /refresh_panel command.")
 
         if not panel_message_found:
-            await channel.send(embed=panel_embed, view=TicketPanelButton())
+            # Send the CategorySelectView (dropdown menu)
+            await channel.send(embed=panel_embed, view=CategorySelectView())
             print("Sent new persistent ticket panel.")
 
     except discord.Forbidden:
@@ -1517,7 +1626,7 @@ async def on_ready():
 
     # Register persistent views (important for buttons/dropdowns that survive bot restart)
     bot.add_view(CloseTicketView())
-    bot.add_view(TicketPanelButton())
+    bot.add_view(CategorySelectView()) # Register the main panel view
     
     # Setup initial panel messages
     await setup_ticket_panel()
