@@ -25,6 +25,7 @@ TICKET_END_HOUR_IST = 24    # 11:59 PM IST (exclusive of midnight)
 
 TICKET_CREATION_STATUS = True 
 V1_REQUIRED_KEYWORDS = ["RASH", "TECH", "SUBSCRIBED"] 
+BYPASS_HOURS_ACTIVE = False # New: Global flag to allow ticket creation outside of operational hours
 
 # ---------------------------
 # Environment Variables (CRITICAL IDs)
@@ -53,7 +54,7 @@ try:
     FEEDBACK_CHANNEL_ID = int(os.getenv("FEEDBACK_CHANNEL_ID"))
     
 except (TypeError, ValueError) as e:
-    raise ValueError(f"Missing or invalid required environment variable ID: {e}. Check all IDs (GUILD_ID, TEMP_ROLE_ID, etc.) are set.")
+    raise ValueError(f"Missing or invalid required environment variable ID: {e}. Check all IDs (GUILD_ID, TEMP_ROLE_ID, etc.) are set correctly as plain numbers.")
 
 YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL")
 if not YOUTUBE_CHANNEL_URL or not TOKEN:
@@ -242,7 +243,7 @@ async def release_cooldown_lock(member: discord.Member):
         del cooldowns[member.id]
         
         activation_category = bot.get_channel(ACTIVATION_CATEGORY_ID)
-        if activation_category:
+        if activation_category and isinstance(activation_category, discord.CategoryChannel):
             await activation_category.set_permissions(
                 member, 
                 read_messages=True, 
@@ -253,6 +254,19 @@ async def release_cooldown_lock(member: discord.Member):
                 await member.send("✅ Your 168-hour access cooldown has expired. You can now create a new ticket.")
             except discord.Forbidden:
                 pass
+
+
+# ---------------------------
+# CORE HELPER: Role Removal
+# ---------------------------
+async def remove_temp_role(member: discord.Member, role: discord.Role):
+    """Removes the temporary role after the defined duration."""
+    await asyncio.sleep(TEMP_ROLE_DURATION_SECONDS)
+    try:
+        if role and role in member.roles:
+            await member.remove_roles(role)
+    except Exception as e:
+        print(f"Error removing temp role from {member.display_name}: {e}")
 
 
 # ---------------------------
@@ -321,14 +335,15 @@ async def perform_ticket_closure(channel: discord.abc.GuildChannel, closer: disc
             )
 
         # 3. Send log and set cooldown/role release tasks
-        log_message = f"✅ User {member.mention} processed: Cooldown set for {COOLDOWN_HOURS}h, Temp Role '{temp_role.name}' applied for {TEMP_ROLE_DURATION_HOURS}h."
+        log_message = f"✅ User {member.mention} processed: Cooldown set for {COOLDOWN_HOURS}h, Temp Role '{temp_role.name if temp_role else 'N/A'}' applied for {TEMP_ROLE_DURATION_HOURS}h."
         await log_channel.send(log_message)
             
         # Task to re-enable category access after cooldown (168 hours)
         bot.loop.create_task(release_cooldown_lock(member))
 
         # Task to remove temporary role (3 hours)
-        bot.loop.create_task(remove_temp_role(member, temp_role))
+        if temp_role:
+             bot.loop.create_task(remove_temp_role(member, temp_role))
 
 
     # Delete Channel/Archive Thread (CRITICAL STEP)
@@ -338,42 +353,6 @@ async def perform_ticket_closure(channel: discord.abc.GuildChannel, closer: disc
     else:
         await channel.delete()
         await log_channel.send(f"✅ Ticket channel **{channel.name}** deleted.")
-
-
-# ---------------------------
-# CORE HELPER: Role Removal
-# ---------------------------
-async def remove_temp_role(member: discord.Member, role: discord.Role):
-    """Removes the temporary role after the defined duration."""
-    await asyncio.sleep(TEMP_ROLE_DURATION_SECONDS)
-    try:
-        if role and member in role.members:
-            await member.remove_roles(role)
-    except Exception as e:
-        print(f"Error removing temp role from {member.display_name}: {e}")
-
-# ---------------------------
-# CORE HELPER: Thread Auto-Archival
-# ---------------------------
-async def archive_thread_after_delay(thread: discord.Thread):
-    """Archives the thread after a 10-minute delay."""
-    
-    # Wait for 10 minutes (600 seconds)
-    await asyncio.sleep(600) 
-
-    # Check if the thread is still active and not already closed by an action
-    if not thread.archived:
-        # Note: We don't perform full closure (no role/cooldown) for inactivity.
-        await thread.send(
-            embed=discord.Embed(
-                description="⏳ This ticket thread has been automatically archived due to 10 minutes of inactivity. Access denied.",
-                color=discord.Color.orange()
-            )
-        )
-        try:
-            await thread.edit(archived=True, locked=True)
-        except discord.Forbidden:
-            print(f"Warning: Failed to auto-archive thread {thread.name}. Missing permissions.")
 
 
 # ---------------------------
@@ -395,20 +374,24 @@ async def deliver_and_close(channel: discord.abc.Messageable, user: discord.Memb
     guild = bot.get_guild(GUILD_ID)
     feedback_channel = guild.get_channel(FEEDBACK_CHANNEL_ID) if guild else None
     
-    # Placeholder for the Support Channel (assuming a dedicated channel ID is needed for 'help')
-    # NOTE: You might need to add a SUPPORT_CHANNEL_ID environment variable if this isn't FEEDBACK_CHANNEL_ID
-    support_channel_mention = "#support" # Using text placeholder
+    # Assuming a general support channel is needed
+    support_channel_mention = "#support" 
     if feedback_channel:
-        support_channel_mention = feedback_channel.mention 
+        # Using the feedback channel for general review/support link if no dedicated support channel ID is provided
+        feedback_mention = feedback_channel.mention 
+    else:
+        feedback_mention = "#feedback-channel"
+        
+    temp_role_name = guild.get_role(TEMP_ROLE_ID).name if guild and guild.get_role(TEMP_ROLE_ID) else "Limited Access"
 
     dm_message = (
         "──────✮<a:Star:1315046783990239325>✮──────\n"
         f"### 🎉 Enjoy your **{app_name_display}** Premium Access! <:Hug:1315198669439504465>\n"
-        f"### Don't forget to leave a quick review in {feedback_channel.mention if feedback_channel else '#feedback'}\n"
+        f"### Don't forget to leave a quick review in {feedback_mention}\n"
         "──────✮<a:Star:1315046783990239325>✮──────\n"
         "### Thank you, and have a wonderful day ahead! <:Hii:1315042464893112410><a:Spark:1315201119068229692>\n"
         "──────✮<a:Star:1315046783990239325>✮──────\n"
-        f"## P.S. You will receive a temporary {TEMP_ROLE_DURATION_HOURS}-hour Limited Access role, which will be removed automatically. You can request another app once the **168-hour cooldown** is removed.\n"
+        f"## P.S. You will receive a temporary **{TEMP_ROLE_DURATION_HOURS}-hour {temp_role_name}** role, which will be removed automatically. You can request another app once the **{COOLDOWN_HOURS}-hour cooldown** is removed.\n"
         f"If you encounter any problems, please visit {support_channel_mention} for help."
     )
     
@@ -441,19 +424,52 @@ async def deliver_and_close(channel: discord.abc.Messageable, user: discord.Memb
     )
 
 # ---------------------------
+# CORE HELPER: Thread Auto-Archival
+# ---------------------------
+async def archive_thread_after_delay(thread: discord.Thread):
+    """Archives the thread after a 10-minute delay."""
+    
+    # Wait for 10 minutes (600 seconds)
+    await asyncio.sleep(600) 
+
+    # Check if the thread is still active and not already closed by an action
+    if not thread.archived:
+        await thread.send(
+            embed=discord.Embed(
+                description="⏳ This ticket thread has been automatically archived due to 10 minutes of inactivity. Access denied.",
+                color=discord.Color.orange()
+            )
+        )
+        try:
+            # For inactivity, we do NOT apply cooldown/role
+            await perform_ticket_closure(thread, bot.user, apply_cooldown=False) 
+        except discord.Forbidden:
+            print(f"Warning: Failed to auto-archive thread {thread.name}. Missing permissions.")
+
+
+# ---------------------------
 # CORE TICKET LOGIC (Shared by /ticket and Button) - NOW CREATES A THREAD
 # ---------------------------
 async def create_new_ticket(interaction: discord.Interaction):
     """Handles the shared logic of checking status, cooldown, creating a THREAD, and sending welcome message."""
-    global TICKET_CREATION_STATUS
+    global TICKET_CREATION_STATUS, BYPASS_HOURS_ACTIVE
     user = interaction.user
     now = datetime.datetime.now(datetime.timezone.utc)
 
-    # 1. Check Global/Clock Status
-    if not TICKET_CREATION_STATUS or not is_ticket_time_allowed():
+    # 1. Check Global Status and Operational Hours
+    is_time_allowed = is_ticket_time_allowed() or BYPASS_HOURS_ACTIVE
+    
+    if not TICKET_CREATION_STATUS or not is_time_allowed:
+        
+        reason = "System is currently closed for maintenance."
+        if not TICKET_CREATION_STATUS:
+             reason = "System is currently closed for maintenance."
+        elif not is_ticket_time_allowed():
+             reason = f"System is outside of operational hours (Daily: {TICKET_START_HOUR_IST}:00 to {TICKET_END_HOUR_IST - 1}:59 IST)."
+        
         closed_embed = discord.Embed(
             title="Ticket System Offline 💥",
-            description=f"The premium ticket creation system is currently closed or outside of operational hours (Daily: {TICKET_START_HOUR_IST}:00 to {TICKET_END_HOUR_IST - 1}:59 IST).",
+            description=reason,
             color=discord.Color.red()
         )
         return await interaction.response.send_message(
@@ -461,12 +477,11 @@ async def create_new_ticket(interaction: discord.Interaction):
             ephemeral=True
         )
 
-    # 2. Check Cooldown/Category Lock
+    # 2. Check Cooldown/Category Lock (Primary check)
     activation_category = bot.get_channel(ACTIVATION_CATEGORY_ID)
     if activation_category and isinstance(activation_category, discord.CategoryChannel):
         permissions = activation_category.permissions_for(user)
         if not permissions.view_channel:
-            # User is locked out by the category override (cooldown is active)
             cooldown_end = cooldowns.get(user.id)
             time_left_str = str(cooldown_end - now).split('.')[0] if cooldown_end and cooldown_end > now else "N/A"
             
@@ -481,7 +496,7 @@ async def create_new_ticket(interaction: discord.Interaction):
                 ephemeral=True
             )
     
-    # 3. Check Cooldown (Backup check)
+    # 3. Check Cooldown (Backup for users not in the category list)
     if user.id in cooldowns and cooldowns[user.id] > now:
         remaining = cooldowns[user.id] - now
         time_left_str = str(remaining).split('.')[0] 
@@ -514,14 +529,12 @@ async def create_new_ticket(interaction: discord.Interaction):
             ephemeral=True
         )
 
-    # Cooldown will be set only upon successful closure, removing the initial cooldown set here.
-    
     # 4. Create Thread
     try:
         thread = await interaction.channel.create_thread(
             name=thread_name_prefix,
             type=discord.ChannelType.public_thread,
-            auto_archive_duration=60 # Archive after 60 minutes of inactivity
+            auto_archive_duration=60 
         )
     except discord.Forbidden as e:
         print(f"ERROR: Bot lacks permission to create thread in channel {interaction.channel.name}: {e}")
@@ -764,51 +777,100 @@ class TicketPanelButton(View):
                 )
 
 # =============================
-# ADMIN CONTROL PANEL
+# ADMIN STATUS & BYPASS PANEL
 # =============================
 
-class AdminControlPanel(View):
-    def __init__(self):
-        super().__init__(timeout=None)
+class AdminStatusView(View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=300) # 5 minutes timeout
+        self.owner_id = owner_id
+        
+        # Check if the bypass button should be included initially
+        if not is_ticket_time_allowed():
+            self.add_item(self._create_bypass_button())
 
-    # This button toggles the global TICKET_CREATION_STATUS flag
-    @discord.ui.button(
-        label="TOGGLE TICKET STATUS",
-        style=discord.ButtonStyle.danger,
-        custom_id="admin_toggle_status"
-    )
+    def _create_bypass_button(self):
+        global BYPASS_HOURS_ACTIVE
+        
+        button_style = discord.ButtonStyle.green if BYPASS_HOURS_ACTIVE else discord.ButtonStyle.red
+        button_label = "Deactivate Bypass 🛑" if BYPASS_HOURS_ACTIVE else "Activate Bypass ✅"
+        
+        return discord.ui.Button(
+            label=button_label,
+            style=button_style,
+            custom_id=f"admin_toggle_bypass"
+        )
+
+    # ---------------------------
+    # INTERACTION CALLBACKS
+    # ---------------------------
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Only allow the owner (you) to use these controls
+        if interaction.user.id != self.owner_id:
+             await interaction.response.send_message("❌ You are not authorized to use the admin controls.", ephemeral=True)
+             return False
+        return True
+
+    @discord.ui.button(label="TOGGLE GLOBAL TICKET STATUS", style=discord.ButtonStyle.secondary, custom_id="admin_toggle_global_status")
     async def toggle_status_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.manage_guild:
-            return await interaction.response.send_message("❌ You do not have permission to use this control.", ephemeral=True)
-
         global TICKET_CREATION_STATUS
         TICKET_CREATION_STATUS = not TICKET_CREATION_STATUS
         
-        status_text = "ENABLED ✅" if TICKET_CREATION_STATUS else "DISABLED ❌"
-        status_color = discord.Color.green() if TICKET_CREATION_STATUS else discord.Color.red()
-
-        embed = discord.Embed(
-            title="⚡ PREMIUM TICKET CONTROL PANEL ⚡",
-            description=f"Current Operational Status: **{status_text}**\n\n"
-                        f"Operational Hours: **{TICKET_START_HOUR_IST}:00 to {TICKET_END_HOUR_IST - 1}:59 IST**.\n\n"
-                        "Use the controls below to manage system state and resources.",
-            color=status_color
-        )
+        embed = self._create_status_embed()
         
-        await interaction.response.edit_message(embed=embed, view=self)
+        # We need to recreate the view to correctly update the bypass button if time changes
+        new_view = AdminStatusView(self.owner_id)
+        
+        await interaction.response.edit_message(embed=embed, view=new_view)
+        
+    @discord.ui.button(label="Refresh Panel", style=discord.ButtonStyle.blurple, custom_id="admin_refresh_status_panel")
+    async def refresh_status_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = self._create_status_embed()
+        new_view = AdminStatusView(self.owner_id)
+        await interaction.response.edit_message(embed=embed, view=new_view)
 
-    # This button allows the admin to refresh the main user panel
-    @discord.ui.button(
-        label="Refresh User Panel",
-        style=discord.ButtonStyle.secondary,
-        custom_id="admin_refresh_user_panel"
-    )
-    async def refresh_panel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.manage_guild:
-            return await interaction.response.send_message("❌ You do not have permission to use this control.", ephemeral=True)
+    async def on_button_interaction(self, interaction: discord.Interaction):
+        if interaction.custom_id == "admin_toggle_bypass":
+            await self._handle_bypass_toggle(interaction)
+        # Note: toggle_status_button is handled by its decorator
 
-        await setup_ticket_panel(force_resend=True)
-        await interaction.response.send_message("✅ User panel message updated.", ephemeral=True)
+
+    # ---------------------------
+    # HELPER METHODS
+    # ---------------------------
+    
+    def _create_status_embed(self) -> discord.Embed:
+        status_text = "ENABLED ✅" if TICKET_CREATION_STATUS else "DISABLED ❌"
+        bypass_text = "ACTIVE (Ignoring Clock) 🟢" if BYPASS_HOURS_ACTIVE else "INACTIVE 🔴"
+        
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        now_ist = now_utc + IST_OFFSET
+        
+        embed = discord.Embed(
+            title="⚡ ADMIN STATUS PANEL (Testing Mode) ⚡",
+            description=f"Current Time (IST): **{now_ist.strftime('%Y-%m-%d %H:%M:%S %Z')}**",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Global Status", value=status_text, inline=True)
+        embed.add_field(name="Hours Bypass", value=bypass_text, inline=True)
+        embed.add_field(name="Operational Hours", value=f"{TICKET_START_HOUR_IST}:00 to {TICKET_END_HOUR_IST - 1}:59 IST", inline=False)
+        
+        if not is_ticket_time_allowed():
+            embed.set_footer(text="Bypass button available as time is outside normal operational hours.")
+            
+        return embed
+
+    async def _handle_bypass_toggle(self, interaction: discord.Interaction):
+        global BYPASS_HOURS_ACTIVE
+        
+        BYPASS_HOURS_ACTIVE = not BYPASS_HOURS_ACTIVE
+        
+        embed = self._create_status_embed()
+        # Recreate view to reflect the new state (the button label changes)
+        new_view = AdminStatusView(self.owner_id)
+        
+        await interaction.response.edit_message(embed=embed, view=new_view)
 
 
 # =============================
@@ -1189,18 +1251,26 @@ async def refresh_panel(interaction: discord.Interaction):
     await interaction.followup.send("✅ Ticket panel refreshed and sent with the latest app list.", ephemeral=True)
 
 
-# --- /send_admin_panel ---
-@bot.tree.command(name="send_admin_panel", description="Posts the persistent admin control panel.")
-@app_commands.default_permissions(administrator=True) 
+# =============================
+# SLASH COMMANDS (ADMIN STATUS)
+# =============================
+
+@bot.tree.command(name="status", description="Owner: View ticket system status and toggle hours bypass.")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
-@app_commands.checks.has_permissions(administrator=True)
-async def send_admin_panel(interaction: discord.Interaction):
-    if not ADMIN_PANEL_CHANNEL_ID:
-        return await interaction.response.send_message("❌ Error: ADMIN_PANEL_CHANNEL_ID is not configured.", ephemeral=True)
+async def status_command(interaction: discord.Interaction):
+    # CRITICAL: Only allow the bot owner to use this
+    app_info = await interaction.client.application_info()
+    owner_id = app_info.owner.id
     
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    await setup_admin_panel(force_resend=True)
-    await interaction.followup.send("✅ Admin Control Panel has been posted/refreshed.", ephemeral=True)
+    if interaction.user.id != owner_id:
+        return await interaction.response.send_message("❌ This command is reserved for the bot owner.", ephemeral=True)
+    
+    # Instantiate the view to generate the correct initial state
+    view_instance = AdminStatusView(owner_id)
+    embed = view_instance._create_status_embed()
+    
+    await interaction.response.send_message(embed=embed, view=view_instance, ephemeral=True)
+
 
 # =============================
 # SLASH COMMANDS (USER/GENERAL GROUP)
@@ -1408,68 +1478,25 @@ async def setup_ticket_panel(force_resend=False):
     except Exception as e:
         print(f"An unexpected error occurred during panel setup: {e}")
 
-async def setup_admin_panel(force_resend=False):
-    """Sends or updates the persistent Admin Control Panel."""
-    global TICKET_CREATION_STATUS
-
-    if not ADMIN_PANEL_CHANNEL_ID:
-        print("WARNING: ADMIN_PANEL_CHANNEL_ID is not set. Skipping admin panel setup.")
-        return
-
-    channel = bot.get_channel(ADMIN_PANEL_CHANNEL_ID)
-    if not channel:
-        print(f"ERROR: Could not find admin panel channel with ID {ADMIN_PANEL_CHANNEL_ID}")
-        return
-
-    status_text = "ENABLED ✅" if TICKET_CREATION_STATUS else "DISABLED ❌"
-    status_color = discord.Color.green() if TICKET_CREATION_STATUS else discord.Color.red()
-    
-    panel_embed = discord.Embed(
-        title="⚡ PREMIUM TICKET CONTROL PANEL ⚡",
-        description=f"Current Operational Status: **{status_text}**\n\n"
-                    f"Operational Hours: **{TICKET_START_HOUR_IST}:00 to {TICKET_END_HOUR_IST - 1}:59 IST**.\n\n"
-                    "Use the controls below to manage system state and resources.",
-        color=status_color
-    )
-    
-    try:
-        async for message in channel.history(limit=5):
-            if message.author == bot.user and message.components and message.embeds:
-                if message.embeds[0].title == "⚡ PREMIUM TICKET CONTROL PANEL ⚡":
-                    if force_resend:
-                        await message.delete()
-                        break
-                    else:
-                        await message.edit(embed=panel_embed, view=AdminControlPanel())
-                        print("Updated existing admin panel.")
-                        return
-
-        # Send a new one if not found or if forced
-        await channel.send(embed=panel_embed, view=AdminControlPanel())
-        print("Sent new persistent admin control panel.")
-
-    except discord.Forbidden:
-        print("ERROR: Missing permissions to read or send messages in the admin panel channel.")
-    except Exception as e:
-        print(f"An unexpected error occurred during admin panel setup: {e}")
-
 
 # =============================
 # ON READY
 # =============================
 @bot.event
 async def on_ready():
+    # Fetch application info to get the owner ID for the /status command check
+    app_info = await bot.application_info()
+    bot.owner_id = app_info.owner.id
+    
     # Sync slash commands
     await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
 
     # Register persistent views (important for buttons/dropdowns that survive bot restart)
     bot.add_view(CloseTicketView())
     bot.add_view(TicketPanelButton())
-    bot.add_view(AdminControlPanel()) 
     
     # Setup initial panel messages
     await setup_ticket_panel()
-    await setup_admin_panel() 
 
     print(f"🟢 Bot logged in successfully as {bot.user}")
 
