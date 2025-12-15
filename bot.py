@@ -1,3 +1,5 @@
+ient
+    bot.run(TOKEN)
 # -*- coding: utf-8 -*-
 import discord
 from discord.ext import commands
@@ -25,7 +27,7 @@ TICKET_END_HOUR_IST = 24    # 11:59 PM IST (exclusive of midnight)
 
 TICKET_CREATION_STATUS = True 
 V1_REQUIRED_KEYWORDS = ["RASH", "TECH", "SUBSCRIBED"] 
-BYPASS_HOURS_ACTIVE = False # New: Global flag to allow ticket creation outside of operational hours
+BYPASS_HOURS_ACTIVE = False # Global flag for admin bypass
 
 # ---------------------------
 # Environment Variables (CRITICAL IDs)
@@ -472,7 +474,9 @@ async def create_new_ticket(interaction: discord.Interaction):
             description=reason,
             color=discord.Color.red()
         )
-        return await interaction.response.send_message(
+        
+        # 🛑 FIX 1: Use interaction.followup.send() since deferral is handled by the calling function
+        return await interaction.followup.send(
             embed=closed_embed, 
             ephemeral=True
         )
@@ -485,14 +489,17 @@ async def create_new_ticket(interaction: discord.Interaction):
             cooldown_end = cooldowns.get(user.id)
             time_left_str = str(cooldown_end - now).split('.')[0] if cooldown_end and cooldown_end > now else "N/A"
             
-            return await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="⏳ Access Restricted - Cooldown Active",
-                    description=f"You recently received access and are currently under a security cooldown.\n"
-                                f"Remaining time: **`{time_left_str}`**.\n"
-                                f"Please wait until the restriction is automatically removed.",
-                    color=discord.Color.orange()
-                ),
+            closed_embed_cooldown = discord.Embed(
+                title="⏳ Access Restricted - Cooldown Active",
+                description=f"You recently received access and are currently under a security cooldown.\n"
+                            f"Remaining time: **`{time_left_str}`**.\n"
+                            f"Please wait until the restriction is automatically removed.",
+                color=discord.Color.orange()
+            )
+            
+            # 🛑 FIX 2: Use interaction.followup.send()
+            return await interaction.followup.send(
+                embed=closed_embed_cooldown,
                 ephemeral=True
             )
     
@@ -501,17 +508,20 @@ async def create_new_ticket(interaction: discord.Interaction):
         remaining = cooldowns[user.id] - now
         time_left_str = str(remaining).split('.')[0] 
         
-        return await interaction.response.send_message(
-            embed=discord.Embed(
-                title="⏳ Cooldown Active - Please Wait",
-                description=f"You recently opened a ticket. You can open your next ticket in:\n"
-                            f"**`{time_left_str}`**",
-                color=discord.Color.orange()
-            ),
+        closed_embed_cooldown = discord.Embed(
+            title="⏳ Cooldown Active - Please Wait",
+            description=f"You recently opened a ticket. You can open your next ticket in:\n"
+                        f"**`{time_left_str}`**",
+            color=discord.Color.orange()
+        )
+        
+        # 🛑 FIX 3: Use interaction.followup.send()
+        return await interaction.followup.send(
+            embed=closed_embed_cooldown,
             ephemeral=True
         )
     
-    await interaction.response.defer(ephemeral=True, thinking=True)
+    # All checks passed, proceed with thread creation (deferral done in calling function)
     
     # Check if the user already has an active thread/ticket
     thread_name_prefix = f"ticket-{user.id}"
@@ -520,6 +530,7 @@ async def create_new_ticket(interaction: discord.Interaction):
     existing_thread = discord.utils.get(active_threads, name=thread_name_prefix)
     
     if existing_thread:
+        # 🛑 FIX 4: Use interaction.followup.send()
          return await interaction.followup.send(
             embed=discord.Embed(
                 title="⚠️ Existing Ticket Found",
@@ -538,6 +549,7 @@ async def create_new_ticket(interaction: discord.Interaction):
         )
     except discord.Forbidden as e:
         print(f"ERROR: Bot lacks permission to create thread in channel {interaction.channel.name}: {e}")
+        # 🛑 FIX 5: Use interaction.followup.send()
         return await interaction.followup.send(
             "❌ Error: I lack necessary permissions to create a ticket thread in this channel. (Check 'Create Public Threads').", 
             ephemeral=True
@@ -594,6 +606,7 @@ async def create_new_ticket(interaction: discord.Interaction):
 
     await channel.send(f"Welcome {user.mention}! Please select an application below.", embed=embed, view=AppSelect(interaction.user))
 
+    # 🛑 FIX 6: Use interaction.followup.send() for final successful response
     await interaction.followup.send(
         f"✅ Ticket thread created successfully! Head over to {thread.mention} to continue.",
         ephemeral=True
@@ -615,7 +628,7 @@ class AppDropdown(Select):
         self.user = user
 
     async def callback(self, interaction: discord.Interaction):
-        # Acknowledge interaction immediately
+        # Acknowledge interaction immediately (always defer inside callbacks)
         await interaction.response.defer() 
         
         app_key = self.values[0]
@@ -714,6 +727,7 @@ class AppSelect(View):
             self.add_item(
                 discord.ui.Button(label="No Apps Available Yet", style=discord.ButtonStyle.grey, disabled=True)
             )
+
 # =============================
 # TICKET CLOSURE VIEW
 # =============================
@@ -738,12 +752,14 @@ class CloseTicketView(View):
                 ephemeral=True
             )
 
+        # Acknowledge immediately
         await interaction.response.send_message(
             "Closing ticket and applying cooldown... ⏳", 
             ephemeral=False
         )
         
         # Pass apply_cooldown=True to trigger the full shutdown/cooldown logic
+        # Use interaction.user as closer
         await perform_ticket_closure(target_channel, interaction.user, apply_cooldown=True)
         
 # =============================
@@ -760,21 +776,21 @@ class TicketPanelButton(View):
         custom_id="persistent_create_ticket_button" 
     )
     async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 🛑 FIX 7: Acknowledge the interaction immediately with defer()
         try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
             await create_new_ticket(interaction)
-        except discord.errors.Forbidden:
-            await interaction.response.send_message(
-                "❌ Error: I lack necessary permissions (e.g., Create Public Threads) to create your ticket.", 
-                ephemeral=True
-            )
         except Exception as e:
             print(f"CRITICAL ERROR in Ticket Creation Button: {e}")
-            
-            if not interaction.response.is_done():
-                 await interaction.response.send_message(
+            # 🛑 FIX 8: Send the error as a FOLLOWUP message
+            try:
+                await interaction.followup.send(
                     "❌ An unexpected error occurred while processing your ticket request. Please notify an administrator.", 
                     ephemeral=True
                 )
+            except discord.Forbidden:
+                 pass # Ignore if we can't send the followup
+
 
 # =============================
 # ADMIN STATUS & BYPASS PANEL
@@ -1280,7 +1296,17 @@ async def status_command(interaction: discord.Interaction):
 @bot.tree.command(name="ticket", description="🎟️ Create a support ticket thread")
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def ticket(interaction: discord.Interaction):
-    await create_new_ticket(interaction)
+    # 🛑 FIX 9: Acknowledge the interaction immediately with defer()
+    try:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        await create_new_ticket(interaction)
+    except Exception as e:
+        print(f"CRITICAL ERROR in Ticket Creation Slash Command: {e}")
+        # Send the error as a FOLLOWUP message
+        await interaction.followup.send(
+            "❌ An unexpected error occurred while processing your ticket request. Please notify an administrator.", 
+            ephemeral=True
+        )
 
 # =============================
 # ON MESSAGE — SCREENSHOT + APP DETECTION
