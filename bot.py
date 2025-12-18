@@ -8,7 +8,23 @@ import json
 import datetime
 import asyncio
 from threading import Thread
-from flask import Flask
+from flask import Flask, request
+import logging
+from typing import Dict, List, Optional, Tuple, Any
+from pathlib import Path
+
+# ---------------------------
+# LOGGING CONFIGURATION
+# ---------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # ---------------------------
 # GLOBAL CONFIGURATION
@@ -21,7 +37,7 @@ TEMP_ROLE_DURATION_SECONDS = TEMP_ROLE_DURATION_HOURS * 3600
 # Ticket operational hours (2:00 PM IST to 11:59 PM IST)
 IST_OFFSET = datetime.timedelta(hours=5, minutes=30)
 TICKET_START_HOUR_IST = 14  # 2:00 PM IST
-TICKET_END_HOUR_IST = 24    # 11:59 PM IST (exclusive of midnight)
+TICKET_END_HOUR_IST = 23    # 11:59 PM IST (exclusive of midnight)
 
 TICKET_CREATION_STATUS = True 
 V1_REQUIRED_KEYWORDS = ["RASH", "TECH", "SUBSCRIBED"] 
@@ -66,35 +82,49 @@ if not YOUTUBE_CHANNEL_URL or not TOKEN:
 # ---------------------------
 # Load / Save Apps (JSON Database)
 # ---------------------------
-def load_apps():
+def load_apps() -> Dict[str, str]:
     """Loads the app list (final links) from apps.json."""
     try:
-        with open("apps.json", "r") as f:
-            return json.load(f)
+        with open("apps.json", "r", encoding='utf-8') as f:
+            data = json.load(f)
+            logger.info(f"Successfully loaded {len(data)} apps from apps.json")
+            return data
     except FileNotFoundError:
+        logger.warning("apps.json not found. Creating file with default data.")
         default_apps = {
             "spotify": "https://link-target.net/1438550/4r4pWdwOV2gK",
             "youtube": "https://example.com/youtube-download",
             "kinemaster": "https://link-center.net/1438550/dP4XtgqcsuU1",
             "hotstar": "https://final-link.com/hotstar-premium",
-            "vpn": "https://final-link.com/vpn-premium", 
+            "vpn": "https://final-link.com/vpn-premium",
             "truecaller": "https://link-target.net/1438550/kvu1lPW7ZsKu",
-            "bilibili": "https://final-link.com/bilibili-premium", 
+            "bilibili": "https://final-link.com/bilibili-premium",
             "castle": "https://final-link.com/castle-premium",
         }
-        print("Warning: apps.json not found. Creating file with default data.")
-        with open("apps.json", "w") as f:
-            json.dump(default_apps, f, indent=4)
+        try:
+            with open("apps.json", "w", encoding='utf-8') as f:
+                json.dump(default_apps, f, indent=4, ensure_ascii=False)
+            logger.info("Created apps.json with default data")
+        except Exception as e:
+            logger.error(f"Failed to create default apps.json: {e}")
+            raise
         return default_apps
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in apps.json: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error loading apps.json: {e}")
+        raise
 
-def save_apps(apps):
+def save_apps(apps: Dict[str, str]) -> None:
     """Saves the app list to apps.json."""
     try:
-        with open("apps.json", "w") as f:
-            json.dump(apps, f, indent=4)
-        print("DEBUG: Successfully saved apps.json.")
+        with open("apps.json", "w", encoding='utf-8') as f:
+            json.dump(apps, f, indent=4, ensure_ascii=False)
+        logger.info(f"Successfully saved {len(apps)} apps to apps.json")
     except Exception as e:
-        print(f"CRITICAL ERROR: Failed to write to apps.json. Check hosting permissions: {e}")
+        logger.error(f"Failed to write to apps.json: {e}")
+        raise
 
 
 # ---------------------------
@@ -106,18 +136,47 @@ def load_v2_links():
         with open("v2_links.json", "r") as f:
             return json.load(f)
     except FileNotFoundError:
-        print("Warning: v2_links.json not found. Creating file with default data.")
+        logger.warning("v2_links.json not found. Creating file with default data.")
         v2_site_url = "https://verification2-djde.onrender.com"
         default_v2 = {
-            "bilibili": v2_site_url, 
-            "hotstar": v2_site_url, 
-            "vpn": v2_site_url, 
+            "bilibili": v2_site_url,
+            "hotstar": v2_site_url,
+            "vpn": v2_site_url,
         }
         with open("v2_links.json", "w") as f:
             json.dump(default_v2, f, indent=4)
         return default_v2
 
 v2_links = load_v2_links()
+
+# ---------------------------
+# Load / Save User Preferences
+# ---------------------------
+def load_user_preferences() -> Dict[int, Dict[str, Any]]:
+    """Loads user preferences from user_prefs.json."""
+    try:
+        with open("user_prefs.json", "r", encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logger.info("user_prefs.json not found. Creating with default empty data.")
+        return {}
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in user_prefs.json: {e}")
+        return {}
+    except Exception as e:
+        logger.error(f"Unexpected error loading user_prefs.json: {e}")
+        return {}
+
+def save_user_preferences(prefs: Dict[int, Dict[str, Any]]) -> None:
+    """Saves user preferences to user_prefs.json."""
+    try:
+        with open("user_prefs.json", "w", encoding='utf-8') as f:
+            json.dump(prefs, f, indent=4, ensure_ascii=False)
+        logger.info(f"Successfully saved user preferences for {len(prefs)} users")
+    except Exception as e:
+        logger.error(f"Failed to save user preferences: {e}")
+
+user_preferences = load_user_preferences()
 # ---------------------------
 
 # ---------------------------
@@ -162,6 +221,10 @@ app = Flask(__name__)
 @app.route('/')
 def home():
     return "Bot is alive!"
+
+@app.route('/welcome')
+def welcome():
+    return f"Welcome to the Discord Bot! Bot is running and ready to serve."
 
 def run_flask():
     app.run(host="0.0.0.0", port=8080)
@@ -234,7 +297,7 @@ async def remove_temp_role(member: discord.Member, role: discord.Role):
     try:
         if role and role in member.roles: await member.remove_roles(role)
     except Exception as e:
-        print(f"Error removing temp role from {member.display_name}: {e}")
+        logger.error(f"Error removing temp role from {member.display_name}: {e}")
 
 
 # ---------------------------
@@ -334,12 +397,19 @@ async def deliver_and_close(channel: discord.abc.Messageable, user: discord.Memb
     embed.set_thumbnail(url=user.display_avatar.url)
 
     await channel.send(embed=embed)
-    
-    try:
-        await user.send(dm_message) 
-        await user.send(embed=embed) 
-    except discord.Forbidden:
-        pass 
+
+    # Check user preferences for DM notifications
+    user_prefs = user_preferences.get(user.id, {})
+    dm_enabled = user_prefs.get('dm_notifications', True)  # Default to True
+
+    if dm_enabled:
+        try:
+            await user.send(dm_message)
+            await user.send(embed=embed)
+        except discord.Forbidden:
+            logger.warning(f"Could not send DM to {user.display_name} - DMs disabled or blocked")
+    else:
+        logger.info(f"Skipped DM notification for {user.display_name} - user has disabled DM notifications")
 
     # Final closure prompt
     await channel.send(
@@ -364,9 +434,9 @@ async def archive_thread_after_delay(thread: discord.Thread):
             )
         )
         try:
-            await perform_ticket_closure(thread, bot.user, apply_cooldown=False) 
+            await perform_ticket_closure(thread, bot.user, apply_cooldown=False)
         except discord.Forbidden:
-            print(f"Warning: Failed to auto-archive thread {thread.name}. Missing permissions.")
+            logger.warning(f"Failed to auto-archive thread {thread.name}. Missing permissions.")
 
 
 # ---------------------------
@@ -425,7 +495,7 @@ async def create_new_ticket(interaction: discord.Interaction):
             name=thread_name_prefix, type=discord.ChannelType.public_thread, auto_archive_duration=60 
         )
     except discord.Forbidden as e:
-        print(f"ERROR: Bot lacks permission to create thread in channel {interaction.channel.name}: {e}")
+        logger.error(f"Bot lacks permission to create thread in channel {interaction.channel.name}: {e}")
         return await interaction.followup.send("❌ Error: I lack permissions to create a thread.", ephemeral=True)
     
     bot.loop.create_task(archive_thread_after_delay(thread))
@@ -495,9 +565,9 @@ class TicketPanelButton(View):
             await interaction.response.defer(ephemeral=True, thinking=True)
             await create_new_ticket(interaction)
         except Exception as e:
-            print(f"CRITICAL ERROR in Ticket Creation Button: {e}")
+            logger.error(f"CRITICAL ERROR in Ticket Creation Button: {e}")
             await interaction.followup.send(
-                "❌ An unexpected error occurred while processing your ticket request. Please notify an administrator.", 
+                "❌ An unexpected error occurred while processing your ticket request. Please notify an administrator.",
                 ephemeral=True
             )
 
@@ -620,6 +690,28 @@ class VerificationView(View):
         
         await self.ticket_channel.send(embed=discord.Embed(title="❌ Verification Proof Denied", description=f"Your submission for **{self.app_key.title()}** was denied by {interaction.user.mention}.", color=discord.Color.red()))
         await interaction.response.send_message(f"❌ Denied proof for {self.user.mention}.", ephemeral=True)
+
+
+# =============================
+# CLOSE TICKET VIEW
+# =============================
+class CloseTicketView(View):
+    """View for Users to Close Their Ticket After Receiving the Link."""
+    def __init__(self, user: discord.Member):
+        super().__init__(timeout=3600)  # 1 hour timeout
+        self.user = user
+
+    @discord.ui.button(label="✅ Close Ticket & Apply Cooldown", style=discord.ButtonStyle.green, custom_id="close_ticket_apply_cooldown")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.user:
+            return await interaction.response.send_message("❌ Only the ticket owner can close this ticket.", ephemeral=True)
+
+        await interaction.response.defer()
+        for item in self.children: item.disabled = True
+        await interaction.message.edit(view=self)
+
+        await perform_ticket_closure(interaction.channel, interaction.user, apply_cooldown=True)
+        await interaction.followup.send("✅ Ticket closed successfully! Your cooldown and restrictions have been applied.", ephemeral=True)
 
 
 # =============================
@@ -776,6 +868,119 @@ async def status_command(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=view_instance, ephemeral=True)
 
 # =============================
+# USER PREFERENCES VIEW
+# =============================
+class UserPreferencesView(View):
+    """View for users to manage their preferences."""
+    def __init__(self, user_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self._update_buttons()
+
+    def _update_buttons(self):
+        """Update button states based on current preferences."""
+        prefs = user_preferences.get(self.user_id, {})
+        dm_enabled = prefs.get('dm_notifications', True)
+
+        # Clear existing items
+        self.clear_items()
+
+        # DM Notifications Toggle
+        dm_label = "Disable DM Notifications ❌" if dm_enabled else "Enable DM Notifications ✅"
+        dm_style = discord.ButtonStyle.red if dm_enabled else discord.ButtonStyle.green
+        self.add_item(discord.ui.Button(
+            label=dm_label,
+            style=dm_style,
+            custom_id="toggle_dm_notifications"
+        ))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ These preferences are not for you!", ephemeral=True)
+            return False
+        return True
+
+    async def toggle_dm_notifications(self, interaction: discord.Interaction, button: discord.ui.Button):
+        global user_preferences
+        await interaction.response.defer(ephemeral=True)
+
+        prefs = user_preferences.get(self.user_id, {})
+        current_setting = prefs.get('dm_notifications', True)
+        prefs['dm_notifications'] = not current_setting
+        user_preferences[self.user_id] = prefs
+        save_user_preferences(user_preferences)
+
+        self._update_buttons()
+        embed = self._create_preferences_embed()
+        await interaction.edit_original_response(embed=embed, view=self)
+
+        status = "disabled" if not current_setting else "enabled"
+        await interaction.followup.send(f"✅ DM notifications have been {status}!", ephemeral=True)
+
+    def _create_preferences_embed(self) -> discord.Embed:
+        prefs = user_preferences.get(self.user_id, {})
+        dm_enabled = prefs.get('dm_notifications', True)
+
+        embed = discord.Embed(
+            title="⚙️ Your Preferences",
+            description="Manage your bot interaction preferences below.",
+            color=discord.Color.blue()
+        )
+
+        embed.add_field(
+            name="📱 DM Notifications",
+            value=f"**{'Enabled ✅' if dm_enabled else 'Disabled ❌'}**\n"
+                  f"Receive direct messages when your verification is approved.",
+            inline=False
+        )
+
+        embed.set_footer(text="Click the buttons below to change your preferences.")
+        return embed
+
+# =============================
+# PROGRESS INDICATOR EMBED
+# =============================
+def create_progress_embed(step: int, total_steps: int, description: str, user: discord.Member) -> discord.Embed:
+    """Create a progress indicator embed for verification steps."""
+    progress_bar = ""
+    for i in range(total_steps):
+        if i < step:
+            progress_bar += "🟢"  # Completed
+        elif i == step:
+            progress_bar += "🟡"  # Current
+        else:
+            progress_bar += "⚪"  # Pending
+
+    embed = discord.Embed(
+        title=f"📋 Verification Progress - Step {step + 1}/{total_steps}",
+        description=f"{description}\n\n{progress_bar}",
+        color=discord.Color.blue()
+    )
+
+    embed.set_author(name=f"{user.display_name}'s Verification", icon_url=user.display_avatar.url)
+
+    if step == 0:
+        embed.add_field(
+            name="✅ Step 1: Proof Submission",
+            value="Upload your subscription screenshot with the security keyword.",
+            inline=False
+        )
+    elif step == 1:
+        embed.add_field(
+            name="⏳ Step 2: Admin Review",
+            value="Your proof is being reviewed by our team.",
+            inline=False
+        )
+    elif step == 2:
+        embed.add_field(
+            name="🎉 Step 3: Link Delivery",
+            value="Verification approved! Receiving premium access link.",
+            inline=False
+        )
+
+    return embed
+
+# =============================
 # SLASH COMMANDS (USER/GENERAL GROUP)
 # =============================
 
@@ -783,6 +988,13 @@ async def status_command(interaction: discord.Interaction):
 @app_commands.guilds(discord.Object(id=GUILD_ID))
 async def ticket(interaction: discord.Interaction):
     await interaction.response.send_message("Please use the **Create New Ticket** button in the ticket panel channel.", ephemeral=True)
+
+@bot.tree.command(name="preferences", description="⚙️ Manage your bot preferences")
+@app_commands.guilds(discord.Object(id=GUILD_ID))
+async def preferences_command(interaction: discord.Interaction):
+    view = UserPreferencesView(interaction.user.id)
+    embed = view._create_preferences_embed()
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # =============================
@@ -894,17 +1106,17 @@ async def setup_ticket_panel(force_resend=False):
                     else:
                         # If found and not forced, just edit the existing message to update status
                         await message.edit(embed=panel_embed, view=TicketPanelButton())
-                        print("Updated existing ticket panel.")
-                        return
-        
+        logger.info("Updated existing ticket panel.")
+        return
+
         # Send new message if not found or if forced to resend
         await channel.send(embed=panel_embed, view=TicketPanelButton())
-        print("Sent new persistent ticket panel.")
+        logger.info("Sent new persistent ticket panel.")
 
     except discord.Forbidden:
-        print("ERROR: Missing permissions to read or send messages in the ticket panel channel.")
+        logger.error("Missing permissions to read or send messages in the ticket panel channel.")
     except Exception as e:
-        print(f"An unexpected error occurred during panel setup: {e}")
+        logger.error(f"An unexpected error occurred during panel setup: {e}")
 
 
 # =============================
@@ -922,7 +1134,7 @@ async def on_ready():
     
     await setup_ticket_panel()
 
-    print(f"🟢 Bot logged in successfully as {bot.user}")
+    logger.info(f"Bot logged in successfully as {bot.user}")
 
 
 # =============================
