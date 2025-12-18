@@ -70,7 +70,10 @@ try:
     ACTIVATION_CATEGORY_ID = int(os.getenv("ACTIVATION_CATEGORY_ID")) 
     TEMP_ROLE_ID = int(os.getenv("TEMP_ROLE_ID"))
     FEEDBACK_CHANNEL_ID = int(os.getenv("FEEDBACK_CHANNEL_ID"))
-    
+    ANNOUNCEMENT_CHANNEL_ID = os.getenv("ANNOUNCEMENT_CHANNEL_ID")
+    if ANNOUNCEMENT_CHANNEL_ID:
+        ANNOUNCEMENT_CHANNEL_ID = int(ANNOUNCEMENT_CHANNEL_ID)
+
 except (TypeError, ValueError) as e:
     raise ValueError(f"Missing or invalid required environment variable ID: {e}. Check all IDs are set correctly as plain numbers.")
 
@@ -116,15 +119,86 @@ def load_apps() -> Dict[str, str]:
         logger.error(f"Unexpected error loading apps.json: {e}")
         raise
 
-def save_apps(apps: Dict[str, str]) -> None:
+async def save_apps(apps: Dict[str, str]) -> None:
     """Saves the app list to apps.json."""
     try:
+        # Load current apps to compare for announcements
+        try:
+            with open("apps.json", "r", encoding='utf-8') as f:
+                current_apps = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            current_apps = {}
+
+        # Save the new apps
         with open("apps.json", "w", encoding='utf-8') as f:
             json.dump(apps, f, indent=4, ensure_ascii=False)
         logger.info(f"Successfully saved {len(apps)} apps to apps.json")
+
+        # Send announcements for added/removed apps
+        await send_app_change_announcements(current_apps, apps)
+
     except Exception as e:
         logger.error(f"Failed to write to apps.json: {e}")
         raise
+
+async def send_app_change_announcements(old_apps: Dict[str, str], new_apps: Dict[str, str]) -> None:
+    """Send announcements when apps are added or removed."""
+    if not ANNOUNCEMENT_CHANNEL_ID:
+        return
+
+    try:
+        announcement_channel = bot.get_channel(ANNOUNCEMENT_CHANNEL_ID)
+        if not announcement_channel:
+            logger.warning(f"Announcement channel {ANNOUNCEMENT_CHANNEL_ID} not found")
+            return
+
+        # Find added apps
+        added_apps = {k: v for k, v in new_apps.items() if k not in old_apps}
+        # Find removed apps
+        removed_apps = {k: v for k, v in old_apps.items() if k not in new_apps}
+
+        # Send announcement for added apps
+        for app_key, app_link in added_apps.items():
+            embed = discord.Embed(
+                title="🆕 New App Added!",
+                description=f"**{app_key.title()}** has been added to our premium app collection!",
+                color=discord.Color.green()
+            )
+            embed.add_field(
+                name="App Name",
+                value=f"**{app_key.title()}** {get_app_emoji(app_key)}",
+                inline=True
+            )
+            embed.add_field(
+                name="Status",
+                value="✅ **Now Available**",
+                inline=True
+            )
+            embed.set_footer(text="Use the ticket system to get access!")
+            await announcement_channel.send(embed=embed)
+
+        # Send announcement for removed apps
+        for app_key, app_link in removed_apps.items():
+            embed = discord.Embed(
+                title="🗑️ App Removed",
+                description=f"**{app_key.title()}** has been removed from our premium app collection.",
+                color=discord.Color.red()
+            )
+            embed.add_field(
+                name="App Name",
+                value=f"**{app_key.title()}** {get_app_emoji(app_key)}",
+                inline=True
+            )
+            embed.add_field(
+                name="Status",
+                value="❌ **No Longer Available**",
+                inline=True
+            )
+            embed.set_footer(text="Thank you for your understanding.")
+            await announcement_channel.send(embed=embed)
+
+    except Exception as e:
+        logger.error(f"Failed to send app change announcements: {e}")
 
 
 # ---------------------------
@@ -373,7 +447,7 @@ async def deliver_and_close(channel: discord.abc.Messageable, user: discord.Memb
     # --- STYLIZED DM MESSAGE CONTENT ---
     guild = bot.get_guild(GUILD_ID)
     feedback_channel = guild.get_channel(FEEDBACK_CHANNEL_ID) if guild else None
-    support_channel_mention = "#support" 
+    support_channel_mention = "#support"
     feedback_mention = feedback_channel.mention if feedback_channel else "#feedback-channel"
     temp_role_name = guild.get_role(TEMP_ROLE_ID).name if guild and guild.get_role(TEMP_ROLE_ID) else "Limited Access"
 
@@ -386,6 +460,19 @@ async def deliver_and_close(channel: discord.abc.Messageable, user: discord.Memb
         "──────✮<a:Star:1315046783990239325>✮──────\n"
         f"## P.S. You will receive a temporary **{TEMP_ROLE_DURATION_HOURS}-hour {temp_role_name}** role, which will be removed automatically. You can request another app once the **{COOLDOWN_HOURS}-hour cooldown** is removed.\n"
         f"If you encounter any problems, please visit {support_channel_mention} for help."
+    )
+
+    # --- STYLIZED TICKET CLOSURE MESSAGE ---
+    closure_message = (
+        "──────✮<a:Star:1315046783990239325>✮──────\n"
+        f"### 🎉 Enjoy your **{app_name_display}** Premium Access! <:Hug:1315198669439504465>\n"
+        f"### Don't forget to leave a quick review in {feedback_mention}\n"
+        "──────✮<a:Star:1315046783990239325>✮──────\n"
+        "### Thank you, and have a wonderful day ahead! <:Hii:1315042464893112410><a:Spark:1315201119068229692>\n"
+        "──────✮<a:Star:1315046783990239325>✮──────\n"
+        f"## P.S. You will receive a temporary **{TEMP_ROLE_DURATION_HOURS}-hour {temp_role_name}** role, which will be removed automatically. You can request another app once the **{COOLDOWN_HOURS}-hour cooldown** is removed.\n"
+        "**Additional Close Reason**\n"
+        "Activation successful self served."
     )
     
     embed = discord.Embed(
@@ -724,7 +811,7 @@ async def add_app(interaction: discord.Interaction, app_name: str, app_link: str
     app_key = app_name.lower()
     current_apps = load_apps()
     current_apps[app_key] = app_link
-    save_apps(current_apps)
+    await save_apps(current_apps)
     embed = discord.Embed(title="✅ App Successfully Added to Database", description=f"**{app_name.title()}** is now available.", color=discord.Color.green())
     await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -739,7 +826,7 @@ async def remove_app(interaction: discord.Interaction, app_name: str):
     if app_key not in current_apps:
         return await interaction.followup.send(embed=discord.Embed(title="❌ App Not Found", description=f"App **{app_name.title()}** not found.", color=discord.Color.red()), ephemeral=True)
     del current_apps[app_key]
-    save_apps(current_apps)
+    await save_apps(current_apps)
     await interaction.followup.send(embed=discord.Embed(title="🗑️ App Permanently Removed", description=f"**{app_name.title()}** removed.", color=discord.Color.red()), ephemeral=True)
 
 @bot.tree.command(name="view_apps", description="📋 View all applications and their links in the database")
@@ -1092,19 +1179,20 @@ async def setup_ticket_panel(force_resend=False):
 
 
     try:
-        panel_message_found = False
+        message_found = False
         async for message in channel.history(limit=5):
             if message.author == bot.user and message.components:
                 # Check for the custom ID used by the button view
                 if message.components[0].children[0].custom_id == "persistent_create_ticket_button":
+                    message_found = True
                     if force_resend:
                         await message.delete()
                         break
                     else:
                         # If found and not forced, just edit the existing message to update status
                         await message.edit(embed=panel_embed, view=TicketPanelButton())
-        logger.info("Updated existing ticket panel.")
-        return
+                        logger.info("Updated existing ticket panel.")
+                        return
 
         # Send new message if not found or if forced to resend
         await channel.send(embed=panel_embed, view=TicketPanelButton())
@@ -1123,12 +1211,13 @@ async def setup_ticket_panel(force_resend=False):
 async def on_ready():
     app_info = await bot.application_info()
     bot.owner_id = app_info.owner.id
-    
+
     await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
 
     bot.add_view(TicketPanelButton())
-    
-    await setup_ticket_panel()
+
+    # Auto-post ticket panel on startup/restart, deleting previous messages
+    await setup_ticket_panel(force_resend=True)
 
     logger.info(f"Bot logged in successfully as {bot.user}")
 
