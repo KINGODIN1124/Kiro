@@ -537,18 +537,15 @@ async def create_new_ticket(interaction: discord.Interaction):
 # =============================
 class TicketPanelButton(View):
     def __init__(self):
-        super().__init__(timeout=None) 
-        
-        is_system_open = is_ticket_time_allowed() or BYPASS_HOURS_ACTIVE
-        self.add_item(discord.ui.Button(
-            label="Create New Ticket",
-            style=discord.ButtonStyle.blurple,
-            emoji="📩",
-            custom_id="persistent_create_ticket_button",
-            disabled=not is_system_open
-        ))
+        super().__init__(timeout=None)
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+    @discord.ui.button(
+        label="Create New Ticket",
+        style=discord.ButtonStyle.blurple,
+        emoji="📩",
+        custom_id="persistent_create_ticket_button"
+    )
+    async def create_ticket_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Check if the system is open before processing
         is_system_open = is_ticket_time_allowed() or BYPASS_HOURS_ACTIVE
         if not is_system_open:
@@ -556,10 +553,8 @@ class TicketPanelButton(View):
                 f"❌ The ticket system is currently closed. It opens daily from {TICKET_START_HOUR_IST}:00 to {TICKET_END_HOUR_IST - 1}:59 IST.",
                 ephemeral=True
             )
-            return False
-        return True
+            return
 
-    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Acknowledge the interaction immediately with defer()
         try:
             await interaction.response.defer(ephemeral=True, thinking=True)
@@ -603,6 +598,8 @@ class AdminStatusView(View):
         if item.custom_id == "admin_toggle_bypass":
             await interaction.response.defer(ephemeral=True)
             await self._handle_bypass_toggle(interaction)
+        else:
+            await super().on_item_interaction(interaction, item)
 
     @discord.ui.button(label="TOGGLE GLOBAL TICKET STATUS", style=discord.ButtonStyle.secondary, custom_id="admin_toggle_global_status")
     async def toggle_status_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1129,8 +1126,7 @@ async def on_ready():
     
     await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
 
-    bot.add_view(CloseTicketView())
-    bot.add_view(TicketPanelButton()) 
+    bot.add_view(TicketPanelButton())
     
     await setup_ticket_panel()
 
